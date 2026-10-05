@@ -1,0 +1,25 @@
+# Секреты и данные — НЕ в репозиторий
+token.txt
+.env
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Служебное
+*.db
+*.db-wal
+*.db-shm
+data/recon/
+_autostart.ps1
+
+# Редакторы и ОС
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
