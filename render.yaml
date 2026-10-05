@@ -1,0 +1,32 @@
+# Бесплатный хостинг бота расписания: Render Free + пинг каждые 5 минут.
+#
+# Что заполнить в панели Render при создании сервиса (Blueprint):
+#   BOT_TOKEN  - токен от @BotFather (обязательно)
+#   OWNER_ID   - ваш Telegram id: в этот чат бот складывает резервные копии базы
+#                (узнать: напишите боту /whoami)
+# Остальное подставится само. Адрес сервиса Render выдаст сам и передаст боту
+# в переменной RENDER_EXTERNAL_URL - бот сам включит режим вебхука.
+
+services:
+  - type: web
+    name: schedule-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: REFRESH_MINUTES
+        value: "20"
+      - key: SNAPSHOT_INTERVAL
+        value: "1800"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TZ
+        value: Europe/Moscow
