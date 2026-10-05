@@ -1,0 +1,508 @@
+# -*- coding: utf-8 -*-
+"""Все тексты и клавиатуры бота расписания (русский язык).
+
+Здесь только представление: функции принимают данные и возвращают строки
+(HTML для Telegram) либо разметку кнопок. Логика — в bot.py.
+"""
+
+from datetime import date, datetime
+
+from schedule.unifirst import day_label, week_label
+
+# ------------------------------------------------------------- подписи кнопок
+
+BTN_TODAY = "📅 Сегодня"
+BTN_TOMORROW = "📅 Завтра"
+BTN_WEEK = "🗓 Неделя"
+BTN_HOMEWORK = "📝 ДЗ"
+BTN_REMINDERS = "⏰ Напоминания"
+BTN_REFRESH = "🔄 Обновить"
+BTN_SETTINGS = "⚙️ Настройки"
+BTN_HELP = "ℹ️ Помощь"
+
+MAIN_BUTTONS = [
+    [BTN_TODAY, BTN_TOMORROW],
+    [BTN_WEEK, BTN_HOMEWORK],
+    [BTN_REMINDERS, BTN_REFRESH],
+    [BTN_SETTINGS, BTN_HELP],
+]
+
+BTN_BACK = "⬅️ Назад"
+BTN_MENU = "🏠 Меню"
+BTN_CANCEL = "✖️ Отмена"
+
+TYPE_ICONS = {
+    "л.": "📖", "лек": "📖", "лекция": "📖",
+    "пр.": "✏️", "практ": "✏️", "семинар": "✏️",
+    "лаб.": "🔬", "лаб": "🔬",
+    "мет.": "🧭", "зач": "📋", "экз": "🎓",
+}
+
+
+def esc(value):
+    """Экранирование под HTML-разметку Telegram."""
+    return (str(value if value is not None else "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def plural(number, one, few, many):
+    number = abs(int(number))
+    if number % 10 == 1 and number % 100 != 11:
+        return one
+    if 2 <= number % 10 <= 4 and not 12 <= number % 100 <= 14:
+        return few
+    return many
+
+
+def pair_word(number):
+    return "%d %s" % (number, plural(number, "пара", "пары", "пар"))
+
+
+# ------------------------------------------------------------------ онбординг
+
+def hello(first_name=""):
+    name = (", " + esc(first_name)) if first_name else ""
+    return (
+        "👋 Привет%s!\n\n"
+        "Я бот расписания <b>Поволжского ГУФКСиТ</b> (Казань).\n"
+        "Показываю пары прямо с официального сайта расписания — всегда актуальные, "
+        "с аудиториями и преподавателями.\n\n"
+        "Что умею:\n"
+        "📅 расписание на сегодня, завтра и любую неделю\n"
+        "📝 общая домашка группы и личные заметки\n"
+        "⏰ напоминания вечером и перед парой\n"
+        "🔔 сообщу, если расписание поменяют\n\n"
+        "<b>Выбери свою группу</b> — и всё заработает." % name)
+
+
+def group_list_page(groups, page, pages, query="", current=""):
+    header = "🎓 <b>Выбор группы</b>\n\n"
+    if query:
+        header += "Поиск: <b>%s</b>\n" % esc(query)
+    else:
+        header += ("Найди свою группу в списке или просто напиши её номер "
+                   "(например <code>26281</code>).\n")
+    if not groups:
+        return (header + "\n😕 Ничего не нашлось. Напиши номер группы иначе — "
+                "например только цифры.", [])
+    lines = []
+    for group in groups:
+        mark = " ✅" if str(group.get("name")) == str(current) else ""
+        subgroups = group.get("subgroups") or []
+        extra = " (+подгруппы)" if subgroups else ""
+        lines.append("• <b>%s</b>%s%s" % (esc(group.get("name")), extra, mark))
+    footer = "\n\nСтраница %d из %d" % (page + 1, max(pages, 1))
+    return header + "\n" + "\n".join(lines) + footer, groups
+
+
+def group_confirmed(group_title, subgroups=None):
+    text = "✅ Группа <b>%s</b> выбрана.\n\n" % esc(group_title)
+    if subgroups:
+        text += "В группе есть подгруппы — выбери свою:"
+    else:
+        text += "Теперь я буду показывать твоё расписание."
+    return text
+
+
+# ---------------------------------------------------------------- расписание
+
+def lesson_block(lesson, index=None):
+    """Одна пара подробно."""
+    icon = TYPE_ICONS.get((lesson.get("type") or "").strip().lower(), "📘")
+    title = esc(lesson.get("subject"))
+    kind = esc(lesson.get("type") or "")
+    time_text = ""
+    if lesson.get("start"):
+        time_text = lesson["start"]
+        if lesson.get("end"):
+            time_text += "–" + lesson["end"]
+    head_parts = []
+    if index:
+        head_parts.append("%d." % index)
+    if lesson.get("para"):
+        head_parts.append("%s пара" % lesson["para"])
+    if time_text:
+        head_parts.append(time_text)
+    head = " · ".join(head_parts)
+    lines = []
+    if head:
+        lines.append("<b>%s</b>" % head)
+    lines.append("%s %s%s" % (icon, title, (" (%s)" % kind) if kind else ""))
+    if lesson.get("teachers"):
+        lines.append("👤 " + esc(", ".join(lesson["teachers"])))
+    if lesson.get("rooms"):
+        lines.append("🚪 " + esc(", ".join(lesson["rooms"])))
+    return "\n".join(lines)
+
+
+def day_schedule(day, lessons, group_title, label=None):
+    """Подробное расписание одного дня."""
+    title = label or day_label(day)
+    header = "📅 <b>%s</b>\n" % esc(title)
+    if group_title:
+        header += "Группа <b>%s</b>\n" % esc(group_title)
+    if not lessons:
+        return header + "\n🎉 Занятий нет — отдыхай!"
+    return header + "\n" + "\n\n".join(lesson_block(item) for item in lessons)
+
+
+def day_compact(day, lessons):
+    """Компактный день для недельного списка."""
+    lines = ["<b>%s</b>" % esc(day_label(day))]
+    if not lessons:
+        return "\n".join(lines + ["   🎉 занятий нет"])
+    for lesson in lessons:
+        time_text = lesson.get("start") or ""
+        bits = [("✏️ " + esc(lesson.get("subject", ""))).strip()]
+        if time_text:
+            bits.append(time_text)
+        if lesson.get("rooms"):
+            bits.append(esc(", ".join(lesson["rooms"])))
+        if lesson.get("teachers"):
+            bits.append(esc(", ".join(lesson["teachers"])))
+        lines.append("   <b>%s</b> %s" % (lesson.get("para") or "•", " · ".join(bits)))
+    return "\n".join(lines)
+
+
+def week_schedule(lessons, group_title, year, week, current_note=""):
+    header = "🗓 <b>%s</b>\n" % esc(week_label(year, week))
+    if group_title:
+        header += "Группа <b>%s</b>" % esc(group_title)
+    if current_note:
+        header += " · %s" % esc(current_note)
+    if not lessons:
+        return header + "\n\n🎉 На эту неделю занятий нет."
+    days = {}
+    for lesson in lessons:
+        days.setdefault(lesson["date"], []).append(lesson)
+    blocks = []
+    for day_key in sorted(days):
+        try:
+            day = datetime.strptime(day_key, "%Y-%m-%d").date()
+        except ValueError:
+            day = date.today()
+        blocks.append(day_compact(day, days[day_key]))
+    return header + "\n\n" + "\n\n".join(blocks)
+
+
+def week_short_list(lessons):
+    """Очень краткая сводка недели: пары, которые вообще есть."""
+    if not lessons:
+        return "занятий нет"
+    days = sorted({item["date"] for item in lessons})
+    return "%s, %s" % (pair_word(len(lessons)), plural(len(days), "день", "дня", "дней"))
+
+
+def no_group_hint():
+    return ("⚠️ Сначала выбери группу — иначе я не знаю, чьё расписание показывать.\n"
+            "Нажми /start или «⚙️ Настройки» → «Сменить группу».")
+
+
+def cache_note(fetched_at=None, online=True):
+    if not online:
+        return "📴 Показал сохранённую копию — сейчас нет связи с сайтом расписания."
+    return ""
+
+
+def refresh_result(title, found_new, changes=(), week_note=""):
+    lines = ["🔄 <b>Проверка расписания</b>", ""]
+    lines.append("Группа <b>%s</b>" % esc(title))
+    if week_note:
+        lines.append(esc(week_note))
+    lines.append("")
+    if found_new:
+        lines.append("⚠️ <b>Расписание изменилось!</b>")
+        for change in changes:
+            lines.append(change)
+    else:
+        lines.append("✅ Всё актуально, изменений нет.")
+    return "\n".join(lines)
+
+
+def changes_lines(changes):
+    """Человекочитаемые строки изменений (added/removed/moved)."""
+    lines = []
+    for change in changes:
+        lesson = change.get("lesson") or {}
+        kind = change.get("kind")
+        subject = esc(lesson.get("subject", ""))
+        time_text = lesson.get("start") or ""
+        rooms = esc(", ".join(lesson.get("rooms") or []))
+        try:
+            day = datetime.strptime(change.get("date", ""), "%Y-%m-%d").date()
+            when = day_label(day)
+        except ValueError:
+            when = change.get("date", "")
+        if kind == "added":
+            lines.append("➕ %s: %s%s%s" % (
+                esc(when), subject,
+                (" · " + time_text) if time_text else "",
+                (" · " + rooms) if rooms else ""))
+        elif kind == "removed":
+            lines.append("➖ %s: %s%s%s" % (
+                esc(when), subject,
+                (" · " + time_text) if time_text else "",
+                (" · " + rooms) if rooms else ""))
+        else:
+            was = change.get("was") or {}
+            detail = ""
+            if was.get("rooms") and was.get("rooms") != lesson.get("rooms"):
+                detail = " (аудитория: %s)" % esc(", ".join(was["rooms"]))
+            lines.append("🔁 %s: %s%s" % (esc(when), subject, detail))
+    return lines
+
+
+# ------------------------------------------------------------------------ ДЗ
+
+def homework_intro():
+    return ("📝 <b>Домашние задания</b>\n\n"
+            "Общая база группы: что задали, к какому сроку, преподаватель и аудитория. "
+            "Любой может добавить — остальные увидят.\n"
+            "Личные заметки видишь только ты.")
+
+
+def homework_item(item, votes=0, mine=False, show_scope=False):
+    scope_icon = "🗒" if item.get("scope") == "personal" else "📘"
+    lines = ["%s <b>%s</b>" % (scope_icon, esc(item.get("subject") or "Без предмета"))]
+    due = item.get("due_date") or ""
+    if due:
+        try:
+            day = datetime.strptime(due, "%Y-%m-%d").date()
+            due_text = day_label(day)
+        except ValueError:
+            due_text = due
+        if item.get("due_time"):
+            due_text += ", к " + item["due_time"]
+        days_left = ""
+        try:
+            delta = (datetime.strptime(due, "%Y-%m-%d").date() - date.today()).days
+            if delta == 0:
+                days_left = " — 🔥 сегодня!"
+            elif delta == 1:
+                days_left = " — завтра"
+            elif delta < 0:
+                days_left = " — просрочено"
+            else:
+                days_left = " — через %d %s" % (delta, plural(delta, "день", "дня", "дней"))
+        except ValueError:
+            days_left = ""
+        lines.append("   🕒 сдать: %s%s" % (esc(due_text), days_left))
+    if item.get("task"):
+        lines.append("   ✍️ %s" % esc(item["task"]))
+    extra = []
+    if item.get("teacher"):
+        extra.append("👤 " + esc(item["teacher"]))
+    if item.get("room"):
+        extra.append("🚪 " + esc(item["room"]))
+    if extra:
+        lines.append("   " + " · ".join(extra))
+    if votes:
+        lines.append("   👍 подтвердили: %d" % votes)
+    if show_scope:
+        lines.append("   <i>%s</i>" % ("личная заметка" if item.get("scope") == "personal"
+                                       else "общее задание группы"))
+    return "\n".join(lines)
+
+
+def explain_homework_how_to_add():
+    return ("✍️ <b>Как добавить ДЗ</b>\n\n"
+            "Отправь одним сообщением:\n"
+            "<code>предмет | задание | срок</code>\n\n"
+            "Примеры:\n"
+            "<code>История | §§1-2, вопросы 3-5 | 08.10</code>\n"
+            "<code>Русский | упражнение 45 | завтра</code>\n"
+            "<code>Математика | задачи 1-10</code>\n\n"
+            "Срок понимаю как <code>08.10</code>, <code>08.10.2026</code>, "
+            "<code>завтра</code>, <code>сегодня</code>, <code>пн</code>.\n"
+            "Куда добавить — общая база группы или личная заметка: кнопки ниже.")
+
+
+def homework_created(item, scope):
+    where = "в личные заметки" if scope == "personal" else "в общую базу группы"
+    return ("✅ Добавил %s:\n\n%s" % (where, homework_item(item)))
+
+
+def homework_empty(scope):
+    if scope == "personal":
+        return ("🗒 Личных заметок пока нет.\n\n"
+                "Нажми «➕ Добавить ДЗ» и выбери «Личная заметка» — увидишь только ты.")
+    return ("📭 ДЗ пока никто не добавил.\n\n"
+            "Будь первым: «➕ Добавить ДЗ» — и вся группа увидит.")
+
+
+def homework_menu(subject_count=0, open_count=0, personal_count=0):
+    return ("📝 <b>ДЗ</b>\n\n"
+            "Открытых заданий в группе: <b>%d</b>\n"
+            "Личных заметок: <b>%d</b>" % (open_count, personal_count))
+
+
+# ------------------------------------------------------------------ напоминания
+
+def reminders_screen(user):
+    evening = "вкл" if user.get("evening_enabled") else "выкл"
+    before = user.get("before_minutes") or 0
+    before_text = "выкл" if not before else "за %d мин" % before
+    return ("⏰ <b>Напоминания</b>\n\n"
+            "🌙 Вечерний дайджест: <b>%s</b>%s\n"
+            "   Присылаю расписание на завтра и что сдать.\n\n"
+            "🔔 Перед парой: <b>%s</b>\n"
+            "   Предупрежу, чтобы не проспать.\n\n"
+            "📣 Об изменениях: <b>%s</b>\n"
+            "   Сообщу, если расписание поправят.\n\n"
+            "📚 О дедлайнах ДЗ: <b>%s</b>" % (
+                evening,
+                (" в %s" % user.get("evening_time")) if user.get("evening_enabled") else "",
+                before_text,
+                "вкл" if user.get("change_alerts") else "выкл",
+                "вкл" if user.get("hw_alerts") else "выкл"))
+
+
+def evening_digest(user, day, lessons, homework, group_title):
+    lines = ["🌙 <b>Завтра: %s</b>" % esc(day_label(day))]
+    if group_title:
+        lines.append("Группа <b>%s</b>" % esc(group_title))
+    lines.append("")
+    if not lessons:
+        lines.append("🎉 Пар нет — можно отдыхать!")
+    else:
+        lines.append("<b>%s</b>" % pair_word(len(lessons)).capitalize())
+        lines.append("")
+        for lesson in lessons:
+            time_text = lesson.get("start") or ""
+            first = "⏰ %s" % time_text if time_text else "⏰"
+            if lesson.get("para"):
+                first += " (%s пара)" % lesson["para"]
+            lines.append(first)
+            lines.append("   📘 %s%s" % (
+                esc(lesson.get("subject")),
+                (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else ""))
+            if lesson.get("rooms"):
+                lines.append("   🚪 %s" % esc(", ".join(lesson["rooms"])))
+            if lesson.get("teachers"):
+                lines.append("   👤 %s" % esc(", ".join(lesson["teachers"])))
+            lines.append("")
+    if homework:
+        lines.append("📝 <b>Не забудь сдать:</b>")
+        for item in homework:
+            lines.append("• %s — %s" % (esc(item.get("subject")),
+                                        esc(item.get("task") or "без описания")))
+    return "\n".join(lines).strip()
+
+
+def before_lesson_reminder(minutes, lesson):
+    time_text = lesson.get("start") or ""
+    return ("🔔 <b>Через %d %s — %s</b>\n"
+            "📘 %s%s\n"
+            "%s%s" % (
+                minutes, plural(minutes, "минута", "минуты", "минут"),
+                esc(time_text) if time_text else "пара",
+                esc(lesson.get("subject")),
+                (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else "",
+                ("🚪 %s\n" % esc(", ".join(lesson["rooms"]))) if lesson.get("rooms") else "",
+                ("👤 %s" % esc(", ".join(lesson["teachers"]))) if lesson.get("teachers") else "",
+            )).strip()
+
+
+def homework_deadline_reminder(items):
+    lines = ["📝 <b>Сегодня сдать:</b>", ""]
+    for item in items:
+        lines.append("• <b>%s</b> — %s" % (esc(item.get("subject")),
+                                           esc(item.get("task") or "без описания")))
+        if item.get("due_time"):
+            lines.append("   ⏰ к %s" % esc(item["due_time"]))
+    return "\n".join(lines)
+
+
+# -------------------------------------------------------------------- настройки
+
+def settings_screen(user, subgroups=None):
+    group = user.get("group_title") or "не выбрана"
+    subgroup = user.get("subgroup") or ""
+    if subgroup:
+        group += " (%s)" % subgroup
+    tz = int(user.get("tz_offset") or 3)
+    return ("⚙️ <b>Настройки</b>\n\n"
+            "🎓 Группа: <b>%s</b>\n"
+            "🕒 Часовой пояс: <b>UTC%s%d</b> (Казань — UTC+3)\n"
+            "🌙 Вечерний дайджест: <b>%s</b>%s\n"
+            "🔔 Перед парой: <b>%s</b>\n"
+            "📣 Изменения расписания: <b>%s</b>\n"
+            "📚 Дедлайны ДЗ: <b>%s</b>" % (
+                esc(group), "+" if tz >= 0 else "", tz,
+                "вкл" if user.get("evening_enabled") else "выкл",
+                (" в %s" % user.get("evening_time")) if user.get("evening_enabled") else "",
+                ("за %d мин" % user["before_minutes"]) if user.get("before_minutes") else "выкл",
+                "вкл" if user.get("change_alerts") else "выкл",
+                "вкл" if user.get("hw_alerts") else "выкл"))
+
+
+def help_text(user=None, is_admin=False):
+    text = (
+        "ℹ️ <b>Помощь</b>\n\n"
+        "<b>Расписание</b>\n"
+        "📅 Сегодня · 📅 Завтра · 🗓 Неделя — пары с временем, аудиторией и "
+        "преподавателем. Листай недели кнопками ← →.\n"
+        "🔄 Обновить — зайти на сайт расписания прямо сейчас и проверить, "
+        "не поменялось ли.\n\n"
+        "<b>ДЗ</b>\n"
+        "📝 ДЗ → «➕ Добавить ДЗ» — пишешь <code>предмет | задание | срок</code>.\n"
+        "Общие задания видны всей группе, личные заметки — только тебе.\n"
+        "Кнопка «👍» на задании = «я тоже это записал».\n\n"
+        "<b>Напоминания</b>\n"
+        "⏰ Напоминания — вечерний дайджест «что завтра», предупреждение перед парой, "
+        "сообщения об изменениях расписания и дедлайнах.\n\n"
+        "<b>Команды</b>\n"
+        "/start — выбрать группу заново\n"
+        "/today, /tomorrow, /week — расписание\n"
+        "/hw — домашние задания\n"
+        "/refresh — проверить актуальность\n"
+        "/settings — настройки\n"
+        "/whoami — какая группа выбрана\n")
+    if is_admin:
+        text += ("\n👑 <b>Админ</b>: /admin — статистика, обновление кэша групп и "
+                 "расписания, рассылка.")
+    return text
+
+
+def whoami(user):
+    user = user or {}
+    lines = []
+    if user.get("group_title"):
+        group = "🎓 Твоя группа: <b>%s</b>" % esc(user["group_title"])
+        if user.get("subgroup"):
+            group += " (подгруппа %s)" % esc(user["subgroup"])
+        lines.append(group)
+    else:
+        lines.append("Группа не выбрана. Нажми /start.")
+    lines.append("🆔 Твой Telegram ID: <code>%s</code>" % esc(user.get("tg_id", "—")))
+    if user.get("is_admin"):
+        lines.append("👑 Ты админ бота")
+    return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------- админ
+
+def admin_screen(stats, groups_updated="", api_ok=True, backup_note=""):
+    return ("👑 <b>Админ-панель</b>\n\n"
+            "👥 Пользователей: <b>%(users)d</b>\n"
+            "🎓 Групп в кэше: <b>%(groups)d</b> (обновлён: %(groups_updated)s)\n"
+            "📚 Групп с подписчиками: <b>%(groups_in_use)d</b>\n"
+            "🗓 Недель расписания в кэше: <b>%(timetable_weeks)d</b>\n"
+            "📝 Открытых ДЗ: <b>%(homework)d</b>\n"
+            "🔔 Изменений за всё время: <b>%(changes)d</b>\n"
+            "💾 Резервные копии базы: <b>%(backup_note)s</b>\n\n"
+            "API расписания: <b>%(api_ok)s</b>" % dict(
+                stats, groups_updated=groups_updated or "никогда",
+                backup_note=backup_note or "не настроены",
+                api_ok="доступен ✅" if api_ok else "недоступен ❌"))
+
+
+def admin_broadcast_done(sent, failed):
+    return "📣 Рассылка завершена: доставлено %d, ошибок %d" % (sent, failed)
+
+
+def error_generic(detail=""):
+    text = ("😔 Что-то пошло не так. Попробуй ещё раз через минуту.")
+    if detail:
+        text += "\n\n<code>%s</code>" % esc(detail[:300])
+    return text
