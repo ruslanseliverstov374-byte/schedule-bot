@@ -198,11 +198,20 @@ python tools/preview.py 26281 --save out.txt # то же в файл
 
 ## 7. Работа 24/7
 
-### Вариант 1: бесплатное облако Render (0 ₽, компьютер не нужен) — рекомендуется
+### Вариант 1: бесплатное облако Render (0 ₽, компьютер не нужен) — уже развёрнуто
 
 **GitHub (код) → Render Free (бот) → Telegram**, пинг каждые 5 минут не даёт бесплатному
 сервису заснуть. База сохраняется закреплённым сообщением в чате владельца и поднимается
 после перезапуска. Пошагово: **[docs/FREE-24-7.md](docs/FREE-24-7.md)**.
+
+| | |
+|---|---|
+| Бот | [@pgufksit_raspisanie_bot](https://t.me/pgufksit_raspisanie_bot) |
+| Сервис | https://schedule-bot-frgz.onrender.com |
+| Страница состояния | https://schedule-bot-frgz.onrender.com/ |
+| Проверка живости | https://schedule-bot-frgz.onrender.com/health |
+| Код | [github.com/ruslanseliverstov374-byte/schedule-bot](https://github.com/ruslanseliverstov374-byte/schedule-bot) |
+| Итог проекта и команды | [docs/HANDOVER.md](docs/HANDOVER.md) |
 
 Плюсы: 0 ₽, карта не нужна, работает без вашего компьютера, бот отвечает мгновенно
 (режим вебхука). Минусы: 750 часов в месяц на аккаунт, сервис засыпает без пинга,
