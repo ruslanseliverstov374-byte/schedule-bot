@@ -25,7 +25,7 @@ jobs:
           set -e
           URL="${{ vars.BOT_URL }}"
           if [ -z "$URL" ]; then
-            URL="https://schedule-bot.onrender.com"
+            URL="https://schedule-bot-frgz.onrender.com"
           fi
           echo "Пингую $URL/health"
           code=$(curl -s -o /dev/null -w "%{http_code}" -m 60 "$URL/health" || echo 000)
