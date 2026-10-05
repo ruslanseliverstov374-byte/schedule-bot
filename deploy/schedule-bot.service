@@ -1,0 +1,25 @@
+[Unit]
+Description=Telegram bot raspisaniya PGUFKSiT (Kazan)
+Documentation=https://timetable.unifirst.ru/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/.env
+ExecStart=/usr/bin/python3 __DIR__/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:__DIR__/logs/service.log
+StandardError=append:__DIR__/logs/service.log
+
+# Бот работает от непривилегированного пользователя, если он создан (см. install_vps.sh)
+User=__USER__
+
+# Немного гигиены: боту нужны только исходящие соединения
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
