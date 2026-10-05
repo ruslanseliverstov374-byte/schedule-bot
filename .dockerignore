@@ -1,0 +1,14 @@
+# Секреты и данные не нужны внутри образа
+token.txt
+.env
+data/
+logs/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.git/
+.github/
+deploy/DEPLOY.md
+docs/preview-*.txt
