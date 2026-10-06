@@ -189,7 +189,8 @@ class ReminderEngine:
                 key = "evening:%s" % today.isoformat()
                 if late_minutes <= EVENING_GRACE_MINUTES:
                     if not self.already_sent(user["tg_id"], "evening", key):
-                        lessons = self.safe_lessons(group_title, tomorrow)
+                        lessons = providers.filter_by_subgroup(
+                            self.safe_lessons(group_title, tomorrow), user.get("subgroup"))
                         homework = self.store.list_homework(
                             user["tg_id"], group_title, scope="group",
                             due_from=tomorrow.isoformat(), due_to=tomorrow.isoformat())
@@ -206,7 +207,8 @@ class ReminderEngine:
         # 2. Предупреждение перед парой — строго до начала пары.
         before_minutes = int(user.get("before_minutes") or 0)
         if before_minutes > 0:
-            lessons = self.safe_lessons(group_title, today) or []
+            lessons = providers.filter_by_subgroup(
+                self.safe_lessons(group_title, today) or [], user.get("subgroup"))
             # Идём по слотам: если пара делится на подгруппы, напоминание одно,
             # со списком вариантов, а не два одинаковых подряд.
             for block in unifirst.group_by_slot(lessons):
