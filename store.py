@@ -6,6 +6,7 @@
 Включены WAL и synchronous=NORMAL — так запись быстрее и не блокирует чтение.
 """
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -134,6 +135,16 @@ class Store:
     def init_schema(self):
         with self._lock, self.connect() as connection:
             connection.executescript(SCHEMA)
+            self.migrate(connection)
+
+    def migrate(self, connection):
+        """Дополняет таблицы новыми столбцами — база живёт долго и обновляется на ходу."""
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(groups)")}
+        if "source_url" not in columns:
+            connection.execute("ALTER TABLE groups ADD COLUMN source_url TEXT DEFAULT ''")
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        if "university" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN university TEXT DEFAULT ''")
 
     def execute(self, sql, params=()):
         with self._lock, self.connect() as connection:
@@ -226,17 +237,28 @@ class Store:
     # ------------------------------------------------------------------ группы
 
     def save_groups(self, groups):
+        """Сохраняет список групп.
+
+        У КГАСУ группы приходят без числового id, поэтому для них берём устойчивый
+        идентификатор из названия — иначе все группы схлопнулись бы в одну запись.
+        """
         stamp = now_iso()
         with self._lock, self.connect() as connection:
             for group in groups or []:
+                name = str(group.get("name") or "")
+                raw_id = group.get("id")
+                if raw_id is None or not str(raw_id).strip().isdigit():
+                    raw_id = int(hashlib.sha1(name.encode("utf-8")).hexdigest()[:8], 16)
                 connection.execute(
-                    "INSERT INTO groups(id, name, has_subgroups, subgroups, updated_at)"
-                    " VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET"
+                    "INSERT INTO groups(id, name, has_subgroups, subgroups, updated_at,"
+                    " source_url) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET"
                     " name=excluded.name, has_subgroups=excluded.has_subgroups,"
-                    " subgroups=excluded.subgroups, updated_at=excluded.updated_at",
-                    (int(group.get("id") or 0), str(group.get("name") or ""),
+                    " subgroups=excluded.subgroups, updated_at=excluded.updated_at,"
+                    " source_url=excluded.source_url",
+                    (int(raw_id), name,
                      1 if group.get("hasSubgroups") else 0,
-                     json.dumps(group.get("subgroups") or [], ensure_ascii=False), stamp))
+                     json.dumps(group.get("subgroups") or [], ensure_ascii=False), stamp,
+                     str(group.get("file_url") or group.get("source_url") or "")))
             connection.commit()
 
     def groups_count(self):
