@@ -460,6 +460,27 @@ def main():
         bot.engine.tick_once(now_utc=night_utc)
         check("ночью бот молчит", len(tg.out(100)) == 0, tg.joined(100)[:200])
 
+        print("\n13. Служебные сообщения не вызывают ответа")
+        # Telegram присылает боту апдейт и о закреплении сообщения — без текста.
+        # Раньше бот отвечал на него «Пока я понимаю только текст и кнопки»,
+        # поэтому после каждой копии базы в чате появлялось лишнее сообщение.
+        tg.clear()
+        bot.handle_update({"message": {
+            "message_id": 5, "chat": {"id": 100},
+            "from": {"id": 100, "first_name": "Тест"},
+            "pinned_message": {"message_id": 4, "date": 0,
+                               "document": {"file_name": "schedule-backup.db.gz"}}}})
+        check("сообщение о закреплении: бот молчит", len(tg.out(100)) == 0,
+              tg.joined(100)[:160])
+
+        tg.clear()
+        bot.handle_update({"message": {
+            "message_id": 6, "chat": {"id": 100},
+            "from": {"id": 100, "first_name": "Тест"},
+            "photo": [{"file_id": "AgAC"}]}})
+        check("фото от человека: один вежливый ответ",
+              "только текст" in tg.joined(100), tg.joined(100)[:160])
+
     finally:
         try:
             mock.stop()
