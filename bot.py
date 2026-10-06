@@ -971,13 +971,18 @@ class ScheduleBot:
             para = parts[2]
             lessons, _ = self.lessons_of(chat_id, user,
                                          _parse_iso(day_iso) or self.local_today(user))
-            lesson = next((item for item in lessons
-                           if item.get("date") == day_iso and str(item.get("para")) == para), None)
-            if lesson:
+            blocks = [block for block in unifirst.group_by_slot(
+                [item for item in lessons if item.get("date") == day_iso])
+                if str(block.get("para")) == para]
+            if blocks:
+                items = blocks[0]["lessons"]
+                # Если пара делится на подгруппы, преподавателя не подставляем:
+                # он у каждой подгруппы свой.
+                teacher = ", ".join(items[0].get("teachers") or []) if len(items) == 1 else ""
+                room = ", ".join(items[0].get("rooms") or []) if len(items) == 1 else ""
                 self.start_homework_input(
-                    chat_id, user, "group", subject=lesson.get("subject", ""),
-                    teacher=", ".join(lesson.get("teachers") or []),
-                    room=", ".join(lesson.get("rooms") or []))
+                    chat_id, user, "group", subject=items[0].get("subject", ""),
+                    teacher=teacher, room=room)
                 return
         self.prompt_homework_from_day(chat_id, user, day_iso)
 
@@ -988,9 +993,14 @@ class ScheduleBot:
             self.tg.send_message(chat_id, "На этот день пар нет — добавь ДЗ вручную.",
                                  reply_markup=self.homework_keyboard())
             return
-        rows = [[tgbot.btn("%s. %s" % (item.get("para"), item.get("subject")),
-                           "hwp:%s:%s" % (day_iso, item.get("para")))]
-                for item in day_lessons]
+        # Одна кнопка на пару: подгруппы — это варианты одной пары, дублировать не нужно.
+        rows = []
+        for block in unifirst.group_by_slot(day_lessons):
+            items = block["lessons"]
+            label = "%s. %s" % (block.get("para"), items[0].get("subject", "пара"))
+            if len(items) > 1:
+                label += " (подгруппы)"
+            rows.append([tgbot.btn(label, "hwp:%s:%s" % (day_iso, block.get("para")))])
         rows.append([tgbot.btn("⬅️ Назад", "hw:list:group")])
         self.tg.send_message(chat_id, "По какому предмету добавить ДЗ?",
                              reply_markup=tgbot.inline(rows))
