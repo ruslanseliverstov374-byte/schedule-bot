@@ -17,6 +17,12 @@ from datetime import date, datetime, timedelta, timezone
 import texts
 from schedule import unifirst
 
+#: Сколько минут после назначенного времени ещё допустимо отправить напоминание.
+#: Позже — уже неактуально: сервис мог проснуться ночью, и «вчерашний» дайджест
+#: разбудил бы человека зря.
+EVENING_GRACE_MINUTES = 90
+HOMEWORK_GRACE_MINUTES = 210
+
 
 class ReminderEngine:
     def __init__(self, store, api, telegram, logger=print, refresh_minutes=20,
@@ -30,6 +36,7 @@ class ReminderEngine:
         self._sleep = sleep
         self._thread = None
         self._stop = threading.Event()
+        self._sent_memory = set()
         self.last_tick = None
         self.last_error = None
 
@@ -171,21 +178,31 @@ class ReminderEngine:
         tomorrow = today + timedelta(days=1)
         group_title = user["group_title"]
 
-        # 1. Вечерний дайджест: расписание на завтра + что сдать
+        # 1. Вечерний дайджест: расписание на завтра + что сдать.
+        # Отправляем только в окне EVENING_GRACE_MINUTES после назначенного времени:
+        # если сервис проснулся ночью или утром, старый дайджест уже не нужен.
         if user.get("evening_enabled"):
-            if self.time_reached(local, user.get("evening_time") or "20:00"):
+            evening_at = user.get("evening_time") or "20:00"
+            late_minutes = self.minutes_late(local, evening_at)
+            if late_minutes is not None:
                 key = "evening:%s" % today.isoformat()
-                if not self.store.was_sent(user["tg_id"], "evening", key):
-                    lessons = self.safe_lessons(group_title, tomorrow)
-                    homework = self.store.list_homework(
-                        user["tg_id"], group_title, scope="group",
-                        due_from=tomorrow.isoformat(), due_to=tomorrow.isoformat())
-                    message = texts.evening_digest(user, tomorrow, lessons or [],
-                                                   homework, group_title)
-                    if self.send(user["tg_id"], message):
-                        self.store.mark_sent(user["tg_id"], "evening", key)
+                if late_minutes <= EVENING_GRACE_MINUTES:
+                    if not self.already_sent(user["tg_id"], "evening", key):
+                        lessons = self.safe_lessons(group_title, tomorrow)
+                        homework = self.store.list_homework(
+                            user["tg_id"], group_title, scope="group",
+                            due_from=tomorrow.isoformat(), due_to=tomorrow.isoformat())
+                        message = texts.evening_digest(user, tomorrow, lessons or [],
+                                                       homework, group_title)
+                        if self.send(user["tg_id"], message):
+                            self.remember_sent(user["tg_id"], "evening", key)
+                elif not self.already_sent(user["tg_id"], "evening", key):
+                    # Время ушло: молча помечаем, чтобы не прислать «вчерашний» дайджест.
+                    self.remember_sent(user["tg_id"], "evening", key)
+                    self.log("Дайджест для %s пропущен: опоздание %d мин"
+                             % (user["tg_id"], int(late_minutes)))
 
-        # 2. Предупреждение перед парой
+        # 2. Предупреждение перед парой — строго до начала пары.
         before_minutes = int(user.get("before_minutes") or 0)
         if before_minutes > 0:
             lessons = self.safe_lessons(group_title, today) or []
@@ -196,21 +213,27 @@ class ReminderEngine:
                 remind_at = start - timedelta(minutes=before_minutes)
                 if remind_at <= local < start:
                     key = "before:%s" % lesson.get("uid", lesson.get("subject", ""))
-                    if not self.store.was_sent(user["tg_id"], "before", key):
+                    if not self.already_sent(user["tg_id"], "before", key):
                         message = texts.before_lesson_reminder(before_minutes, lesson)
                         if self.send(user["tg_id"], message):
-                            self.store.mark_sent(user["tg_id"], "before", key)
+                            self.remember_sent(user["tg_id"], "before", key)
 
-        # 3. Дедлайн ДЗ сегодня
-        if user.get("hw_alerts") and self.time_reached(local, "08:30"):
-            key = "hwday:%s" % today.isoformat()
-            if not self.store.was_sent(user["tg_id"], "hwday", key):
-                items = self.store.list_homework(user["tg_id"], group_title, scope="group",
-                                                 due_from=today.isoformat(),
-                                                 due_to=today.isoformat())
-                if items:
-                    if self.send(user["tg_id"], texts.homework_deadline_reminder(items)):
-                        self.store.mark_sent(user["tg_id"], "hwday", key)
+        # 3. Дедлайн ДЗ сегодня — только утром, а не в любое время суток.
+        if user.get("hw_alerts"):
+            late_minutes = self.minutes_late(local, "08:30")
+            if late_minutes is not None:
+                key = "hwday:%s" % today.isoformat()
+                if late_minutes <= HOMEWORK_GRACE_MINUTES:
+                    if not self.already_sent(user["tg_id"], "hwday", key):
+                        items = self.store.list_homework(
+                            user["tg_id"], group_title, scope="group",
+                            due_from=today.isoformat(), due_to=today.isoformat())
+                        if items:
+                            if self.send(user["tg_id"],
+                                         texts.homework_deadline_reminder(items)):
+                                self.remember_sent(user["tg_id"], "hwday", key)
+                elif not self.already_sent(user["tg_id"], "hwday", key):
+                    self.remember_sent(user["tg_id"], "hwday", key)
 
     def daily_cleanup(self, now_utc):
         key = "cleanup:%s" % now_utc.date().isoformat()
@@ -241,6 +264,52 @@ class ReminderEngine:
         except Exception as error:
             self.log("Не доставлено %s: %s" % (chat_id, error))
             return False
+
+    # --------------------------------------------------- защита от повторов
+
+    def already_sent(self, tg_id, kind, key):
+        """Отправляли ли уже это напоминание.
+
+        Проверяем и базу, и память процесса. Память важна на бесплатном хостинге:
+        если запись в базу не успела попасть в резервную копию (или сорвалась),
+        после пробуждения сервиса напоминание могло уйти повторно — теперь нет.
+        """
+        marker = (tg_id, kind, key)
+        if marker in self._sent_memory:
+            return True
+        try:
+            if self.store.was_sent(tg_id, kind, key):
+                self._sent_memory.add(marker)
+                return True
+        except Exception as error:
+            self.log("Не удалось проверить журнал отправок: %s" % error)
+        return False
+
+    def remember_sent(self, tg_id, kind, key):
+        """Помечаем напоминание отправленным (в памяти всегда, в базе — по возможности)."""
+        marker = (tg_id, kind, key)
+        if len(self._sent_memory) > 5000:      # страховка от роста памяти
+            self._sent_memory.clear()
+        self._sent_memory.add(marker)
+        try:
+            self.store.mark_sent(tg_id, kind, key)
+        except Exception as error:
+            self.log("Отметка об отправке (%s) не сохранилась: %s" % (kind, error))
+
+    def reset_memory(self):
+        """Забыть отметки в памяти процесса (нужно тестам и отладке)."""
+        self._sent_memory.clear()
+
+    @staticmethod
+    def minutes_late(local_dt, hhmm):
+        """Сколько минут прошло после указанного локального времени (None — ещё не наступило)."""
+        try:
+            hours, minutes = [int(part) for part in str(hhmm).split(":")[:2]]
+        except (ValueError, AttributeError):
+            hours, minutes = 20, 0
+        scheduled = local_dt.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        delta = (local_dt - scheduled).total_seconds() / 60.0
+        return delta if delta >= 0 else None
 
     @staticmethod
     def time_reached(local_dt, hhmm):
