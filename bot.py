@@ -26,7 +26,7 @@ import texts
 import tgbot
 from instance_lock import InstanceLock
 from reminders import ReminderEngine
-from schedule import unifirst
+from schedule import providers, unifirst
 from snapshot import SnapshotManager, restore_from_chat
 from store import Store
 from webapp import StatusApp
@@ -79,17 +79,18 @@ def snapshot_interval_minutes():
     return max(1, value // 60) if value > 120 else value
 
 
-def read_token(cli_token=None):
+def read_token(cli_token=None, token_file=None):
     if cli_token:
         return cli_token.strip()
     token = env_value("BOT_TOKEN")
     if token:
         return token
-    if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE, encoding="utf-8") as handle:
-            token = handle.read().strip()
-            if token:
-                return token
+    for path in ([token_file] if token_file else []) + [TOKEN_FILE]:
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                value = handle.read().strip()
+                if value:
+                    return value
     return ""
 
 
@@ -122,15 +123,22 @@ def http_error_code(error):
 
 class ScheduleBot:
     def __init__(self, token, db_path=DEFAULT_DB, refresh_minutes=20, logger=print,
-                 api=None, telegram=None, owner_id=None, webhook_base="", port=None):
+                 api=None, telegram=None, owner_id=None, webhook_base="", port=None,
+                 provider=None, university=""):
         self.log = logger
         self.token = token
         self.store = Store(db_path)
         self.api = api or unifirst.Unifirst()
         self.tg = telegram or tgbot.Telegram(token)
+        # Источник расписания выбирается переменной UNIVERSITY (unifirst или kgasu):
+        # одна кодовая база обслуживает оба вуза.
+        self.provider = provider or providers.make_provider(
+            university or env_value("UNIVERSITY", "unifirst"), store=self.store)
         self.engine = ReminderEngine(self.store, self.api, self.tg, logger=logger,
-                                     refresh_minutes=refresh_minutes)
-        self.lock = InstanceLock(LOCK_FILE)
+                                     refresh_minutes=refresh_minutes,
+                                     provider=self.provider)
+        self.lock = InstanceLock(os.path.join(ROOT, "data",
+                                              "bot-%s.lock" % self.provider.name))
         self.owner_id = int(owner_id) if str(owner_id or "").isdigit() else None
         self.webhook_base = (webhook_base or "").rstrip("/")
         self.port = port
@@ -220,8 +228,8 @@ class ScheduleBot:
         if not force and not self.store.groups_stale(hours=24):
             return self.store.groups_count()
         try:
-            groups = self.api.groups(limit=500)
-        except unifirst.UnifirstError as error:
+            groups = self.provider.groups()
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("Не удалось обновить список групп: %s" % error)
             return self.store.groups_count()
         if groups:
@@ -473,7 +481,9 @@ class ScheduleBot:
         if not user.get("group_title"):
             self.send_group_page(chat_id, user, 0)
             return
-        self.tg.send_message(chat_id, texts.hello(user.get("first_name")),
+        self.tg.send_message(chat_id, texts.hello(user.get("first_name"),
+                                                  self.provider.title,
+                                                  getattr(self.provider, "city", "Казань")),
                              reply_markup=self.main_keyboard())
         self.send_day(chat_id, user, self.local_today(user))
 
@@ -560,8 +570,8 @@ class ScheduleBot:
         stats = self.store.stats()
         online = True
         try:
-            self.api.groups(limit=1)
-        except unifirst.UnifirstError:
+            self.provider.check()
+        except Exception:
             online = False
         buttons = [
             [tgbot.btn("🔄 Обновить группы", "adm:groups"),
@@ -599,6 +609,12 @@ class ScheduleBot:
                 self.log("Не удалось запросить копию базы: %s" % error)
 
     # ------------------------------------------------------------- расписание
+
+    def example_group(self):
+        """Пример названия группы для подсказки в списке (у вузов разные форматы)."""
+        if getattr(self.provider, "name", "") == "kgasu":
+            return "26ЗК01з"
+        return "26281"
 
     def require_group(self, chat_id, user):
         if user.get("group_title"):
@@ -675,7 +691,8 @@ class ScheduleBot:
         else:
             groups = self.store.list_groups(page * GROUPS_PER_PAGE, GROUPS_PER_PAGE)
         text, _ = texts.group_list_page(groups, page, pages, query,
-                                        user.get("group_title") if user else "")
+                                        user.get("group_title") if user else "",
+                                        self.example_group())
         keyboard = self.group_keyboard(page, pages, groups)
         self.store.set_state((user or {}).get("tg_id"), "group_search")
         if edit_message_id:
@@ -1427,6 +1444,9 @@ def run_checks(db_path=DEFAULT_DB, logger=print):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Telegram-бот расписания Поволжского ГУФКСиТ")
     parser.add_argument("--token", help="токен бота от @BotFather")
+    parser.add_argument("--token-file", help="файл с токеном (по умолчанию token.txt)")
+    parser.add_argument("--university", help="источник расписания: unifirst или kgasu "
+                                             "(иначе переменная UNIVERSITY)")
     parser.add_argument("--db", default=DEFAULT_DB, help="путь к базе SQLite")
     parser.add_argument("--refresh-minutes", type=int, default=None,
                         help="как часто проверять расписание на сайте (по умолчанию 20)")
@@ -1448,7 +1468,7 @@ def main(argv=None):
         except ValueError:
             refresh_minutes = 20
 
-    token = read_token(arguments.token)
+    token = read_token(arguments.token, arguments.token_file)
     if not token:
         logger("Не найден токен бота.\n"
                "Получи его у @BotFather и положи в token.txt, "
@@ -1478,7 +1498,8 @@ def main(argv=None):
 
     bot = ScheduleBot(token, db_path=arguments.db,
                       refresh_minutes=refresh_minutes, logger=logger,
-                      owner_id=owner_id, webhook_base=webhook_base, port=port)
+                      owner_id=owner_id, webhook_base=webhook_base, port=port,
+                      university=arguments.university or "")
     try:
         return bot.run()
     except KeyboardInterrupt:
