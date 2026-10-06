@@ -455,6 +455,8 @@ class ScheduleBot:
                        "st:changes"),
              tgbot.btn("📚 Дедлайны: %s" % ("вкл" if user.get("hw_alerts") else "выкл"),
                        "st:hw")],
+            [tgbot.btn("🔕 Тихий режим", "st:quiet"),
+             tgbot.btn("🔔 Все напоминания", "st:loud")],
             [tgbot.btn("ℹ️ Помощь", "help"), tgbot.btn("🏠 Меню", "menu")],
         ])
 
@@ -576,6 +578,18 @@ class ScheduleBot:
             return "выключены (нет OWNER_ID)"
         saved = getattr(self.snapshot, "last_saved_text", "") or "ещё не делалась"
         return "включены, последняя: %s" % saved
+
+    def touched_data(self):
+        """Важные изменения (ДЗ, смена группы): просим обновить копию базы.
+
+        На бесплатном хостинге сервис засыпает каждые ~15 минут, а при пробуждении
+        диск пустой — без такой просьбы свежие правки могли пропасть.
+        """
+        if self.snapshot:
+            try:
+                self.snapshot.request_save()
+            except Exception as error:
+                self.log("Не удалось запросить копию базы: %s" % error)
 
     # ------------------------------------------------------------- расписание
 
@@ -715,6 +729,7 @@ class ScheduleBot:
         self.store.update_user(user["tg_id"], group_id=group_id, group_title=name, subgroup="")
         self.store.set_state(user["tg_id"], "")
         fresh = self.store.get_user(user["tg_id"])
+        self.touched_data()
         self.tg.send_message(chat_id, "✅ Группа <b>%s</b> выбрана!" % texts.esc(name),
                              reply_markup=self.main_keyboard())
         self.send_day(chat_id, fresh, self.local_today(fresh))
@@ -769,6 +784,7 @@ class ScheduleBot:
             created_by=user["tg_id"])
         self.store.set_state(user["tg_id"], "")
         item = self.store.get_homework(hw_id)
+        self.touched_data()
         self.tg.send_message(chat_id, texts.homework_created(item, scope),
                              reply_markup=self.homework_item_keyboard(item, user))
 
@@ -996,6 +1012,7 @@ class ScheduleBot:
                                           "или админ. Можно просто подтвердить его 👍")
             return
         self.store.update_homework(hw_id, status="done")
+        self.touched_data()
         try:
             self.tg.edit_message(chat_id, message_id, "✅ Выполнено: " + texts.homework_item(item))
         except tgbot.TgError:
@@ -1009,6 +1026,7 @@ class ScheduleBot:
             self.tg.send_message(chat_id, "Удалять может только автор задания или админ.")
             return
         self.store.delete_homework(hw_id)
+        self.touched_data()
         try:
             self.tg.edit_message(chat_id, message_id, "🗑 Задание удалено.")
         except tgbot.TgError:
@@ -1041,6 +1059,33 @@ class ScheduleBot:
         elif action == "hw":
             self.store.update_user(user["tg_id"],
                                    hw_alerts=0 if user.get("hw_alerts") else 1)
+        elif action == "quiet":
+            # Всё выключаем: бот пишет только в ответ на вопросы.
+            self.store.update_user(user["tg_id"], evening_enabled=0, before_minutes=0,
+                                   change_alerts=0, hw_alerts=0)
+            self.touched_data()
+            self.tg.send_message(
+                chat_id,
+                "🔕 <b>Тихий режим включён.</b>\n\n"
+                "Бот больше не пишет сам: ни вечернего дайджеста, ни напоминаний "
+                "перед парой, ни сообщений об изменениях расписания. Он отвечает "
+                "только тогда, когда ты сам нажмёшь кнопку или напишешь.\n\n"
+                "Вернуть напоминания: ⚙️ Настройки → «🔔 Все напоминания».",
+                reply_markup=self.main_keyboard())
+        elif action == "loud":
+            self.store.update_user(user["tg_id"], evening_enabled=1, before_minutes=30,
+                                   change_alerts=1, hw_alerts=1)
+            self.touched_data()
+            self.tg.send_message(
+                chat_id,
+                "🔔 <b>Напоминания включены.</b>\n\n"
+                "🌙 Вечером — расписание на завтра и что сдать\n"
+                "🔔 За 30 минут до пары\n"
+                "📣 Если расписание изменят\n"
+                "📚 Утром в день сдачи\n\n"
+                "Каждое напоминание приходит один раз. Настроить по отдельности — "
+                "в ⚙️ Настройках.",
+                reply_markup=self.main_keyboard())
         fresh = self.store.get_user(user["tg_id"])
         try:
             self.tg.edit_message(chat_id, message_id, texts.settings_screen(fresh),
@@ -1062,6 +1107,7 @@ class ScheduleBot:
                                subgroup=subgroup)
         self.store.set_state(user["tg_id"], "")
         fresh = self.store.get_user(user["tg_id"])
+        self.touched_data()
         if message_id:
             try:
                 self.tg.edit_message(chat_id, message_id,
