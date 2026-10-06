@@ -422,6 +422,44 @@ def main():
         check("обновление списка групп из админки", "Список групп обновлён" in tg.joined(100),
               tg.joined(100)[:150])
 
+        print("\n12. Защита от повторных напоминаний (ночной сценарий Render)")
+        # На бесплатном хостинге сервис засыпает и просыпается с пустым диском:
+        # база поднимается из копии, и отметка «уже отправлено» может пропасть.
+        # Проверяем, что в этом случае старые напоминания не приходят заново.
+        from reminders import ReminderEngine
+        store.update_user(100, evening_enabled=1, evening_time="20:00", before_minutes=0)
+        store.execute("DELETE FROM sent")
+        bot.engine.reset_memory()
+        evening_utc = datetime.combine(today, datetime.min.time()) + timedelta(hours=17, minutes=30)
+        tg.clear()
+        bot.engine.tick_once(now_utc=evening_utc)                  # 20:30 по Казани
+        check("дайджест уходит в своё время", len(tg.out(100)) >= 1, tg.joined(100)[:120])
+
+        tg.clear()
+        bot.engine.tick_once(now_utc=evening_utc + timedelta(minutes=1))
+        check("повтор в том же процессе не отправляется", len(tg.out(100)) == 0,
+              tg.joined(100)[:160])
+
+        # Перезапуск сервиса поздним вечером: журнал отправок потерян, время ушло
+        store.execute("DELETE FROM sent")
+        bot.engine = ReminderEngine(store, api, tg, logger=lambda message: None,
+                                    refresh_minutes=20)
+        late_utc = datetime.combine(today, datetime.min.time()) + timedelta(hours=19)   # 22:00
+        tg.clear()
+        bot.engine.tick_once(now_utc=late_utc)
+        check("опоздавший дайджест не отправляется", len(tg.out(100)) == 0,
+              tg.joined(100)[:200])
+        sent_keys = [row["key"] for row in store.query("SELECT key FROM sent WHERE kind='evening'")]
+        check("опоздавший дайджест помечен отправленным", bool(sent_keys), sent_keys)
+
+        # Перезапуск ночью: время дайджеста ещё не наступило — тоже молчим
+        store.execute("DELETE FROM sent")
+        bot.engine.reset_memory()
+        night_utc = datetime.combine(today, datetime.min.time())    # 03:00 по Казани
+        tg.clear()
+        bot.engine.tick_once(now_utc=night_utc)
+        check("ночью бот молчит", len(tg.out(100)) == 0, tg.joined(100)[:200])
+
     finally:
         try:
             mock.stop()
