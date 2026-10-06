@@ -1,11 +1,17 @@
-# Бесплатный хостинг бота расписания: Render Free + пинг каждые 5 минут.
+# Бесплатный хостинг ботов расписания: Render Free + пинг каждые 5 минут.
 #
-# Что заполнить в панели Render при создании сервиса (Blueprint):
-#   BOT_TOKEN  - токен от @BotFather (обязательно)
-#   OWNER_ID   - ваш Telegram id: в этот чат бот складывает резервные копии базы
-#                (узнать: напишите боту /whoami)
+# Один сервис обслуживает оба бота (ПГУФКСиТ и КГАСУ): бесплатный тариф даёт
+# 750 часов в месяц на аккаунт, поэтому два отдельных сервиса круглосуточно
+# в лимит не укладываются. Внутри контейнера первый бот принимает сообщения
+# вебхуком (и отдаёт /health), второй работает опросом Telegram.
+#
+# Что заполнить в панели Render:
+#   BOT_TOKEN        - токен бота Поволжского ГУФКСиТ (обязательно)
+#   BOT_TOKEN_KGASU  - токен бота КГАСУ (обязательно для второго бота)
+#   OWNER_ID         - ваш Telegram id: в чаты с ботами складываются копии баз
+#                      (узнать: напишите любому из ботов /whoami)
 # Остальное подставится само. Адрес сервиса Render выдаст сам и передаст боту
-# в переменной RENDER_EXTERNAL_URL - бот сам включит режим вебхука.
+# в переменной RENDER_EXTERNAL_URL — бот сам включит режим вебхука.
 
 services:
   - type: web
@@ -20,37 +26,12 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: BOT_TOKEN_KGASU
+        sync: false
       - key: OWNER_ID
         sync: false
       - key: REFRESH_MINUTES
         value: "20"
-      - key: SNAPSHOT_INTERVAL
-        value: "1800"
-      - key: PYTHONUNBUFFERED
-        value: "1"
-      - key: TZ
-        value: Europe/Moscow
-
-  # Второй бот — КГАСУ. Тот же код, отличается только источником расписания
-  # (UNIVERSITY=kgasu), токеном и своей базой.
-  - type: web
-    name: kgasu-raspisanie
-    runtime: docker
-    plan: free
-    region: frankfurt
-    dockerfilePath: ./deploy/Dockerfile
-    dockerContext: .
-    healthCheckPath: /health
-    autoDeploy: true
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: OWNER_ID
-        sync: false
-      - key: UNIVERSITY
-        value: kgasu
-      - key: REFRESH_MINUTES
-        value: "30"
       - key: SNAPSHOT_INTERVAL
         value: "1800"
       - key: PYTHONUNBUFFERED
