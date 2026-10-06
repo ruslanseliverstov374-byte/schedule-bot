@@ -44,6 +44,9 @@ WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четв�
 TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
 FROM_RE = re.compile(r"[Сс]\s+(\d{2})\.(\d{2})\.(\d{2,4})")
 TO_RE = re.compile(r"до\s+(\d{2})\.(\d{2})\.(\d{2,4})")
+
+#: Код группы в шапке: «26ЗК01з», «26РП01», «25-ГМ01», «26АП07».
+GROUP_RE = re.compile(r"^\d{2}\s*[- ]?\s*[А-Яа-яA-Za-z]{2,4}\s*[- ]?\s*\d{0,2}\s*[а-яА-Я]?$")
 ROOM_RE = re.compile(r"(?<![\d.])(\d{1,3}\s*[-/]\s*\d{2,4}[а-яА-Я]?|\d{3,4}[а-яА-Я]?)"
                      r"(?![\d.])")
 TEACHER_RE = re.compile(
@@ -56,6 +59,10 @@ TYPE_WORDS = ("лекция", "лекции", "практические", "пр�
 #: Слова, с которых начинается место проведения (пишутся без кавычек).
 PLACE_WORDS = ("НОЦ", "КИТАП", "СК", "спортзал", "бассейн", "стадион", "актовый зал",
                "корпус", "аудитория", "мастерская")
+
+#: Слова-признаки объявления внутри ячейки (это не занятие и не место).
+ANNOUNCEMENT_WORDS = ("собрание", "внимание", "перенос", "отмена", "консультация для",
+                      "зачёт для", "экзамен для")
 
 
 class KgasuError(Exception):
@@ -198,22 +205,104 @@ def grid_from_bytes(blob, file_name=""):
         return {"header": table[header_index - 1] if header_index else [],
                 "columns": columns, "rows": rows, "kind": "docx"}
     text = docparse.doc_text(blob)
-    rows, row_width = _doc_rows(text)
-    columns = _doc_columns(text, row_width)
+    columns = _doc_columns(text, 0)
+    subject_count = len(columns)
+    rows, row_width = _doc_rows(text, subject_count)
     if not rows:
         raise KgasuError("в файле %s не удалось собрать строки расписания" % file_name)
     return {"header": [], "columns": columns, "rows": rows, "kind": "doc",
             "text": text, "row_width": row_width}
 
 
-def _doc_rows(text):
+MONTH_NAMES = {
+    "январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
+    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12,
+}
+
+
+def parse_day_cell(text):
+    """Дата из ячейки вида «21сентября\\nПонедельник» -> (дата, день недели)."""
+    source = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not source:
+        return None, ""
+    weekday = ""
+    for index, name in enumerate(WEEKDAYS):
+        if name.lower() in source.lower():
+            weekday = name
+            break
+    match = re.search(r"(\d{1,2})\s*([а-яё]{3,})", source.lower())
+    if not match:
+        return None, weekday
+    day = int(match.group(1))
+    month_word = match.group(2)
+    month = None
+    for stem, number in MONTH_NAMES.items():
+        if month_word.startswith(stem):
+            month = number
+            break
+    if not month:
+        return None, weekday
+    year = None
+    year_match = re.search(r"\.?(\d{2,4})\s*г?\.?$", source)
+    if year_match:
+        year = int(year_match.group(1))
+        year += 2000 if year < 100 else 0
+    if year is None:
+        year = date.today().year if month >= 8 else date.today().year + 1
+    try:
+        return date(year, month, day), weekday
+    except ValueError:
+        return None, weekday
+
+
+def _dated_rows(cells, subject_count):
+    """Строки расписания, где дата стоит прямо в строке (файлы заочников и сессий).
+
+    Ячейки идут с «дырами» (объединённые ячейки Word), поэтому строку ищем по
+    времени пары: номер — ближайшее число перед ним, дата — ближайшая ячейка
+    с месяцем, занятия — несколько ячеек сразу после времени.
+    """
+    rows = []
+    current_date = None
+    current_day = ""
+    current_para = ""
+    for index, cell in enumerate(cells):
+        day_date, weekday = parse_day_cell(cell)
+        if day_date:
+            current_date, current_day = day_date, weekday or current_day
+            continue
+        if not TIME_RE.search(cell):
+            continue
+        para = ""
+        for back in range(index - 1, max(-1, index - 4), -1):
+            candidate = cells[back].strip()
+            if re.fullmatch(r"\d{1,2}", candidate) and 0 < int(candidate) <= 8:
+                para = candidate
+                break
+        subjects = [cells[position] if position < len(cells) else ""
+                    for position in range(index + 1, index + 1 + subject_count)]
+        rows.append({
+            "day": current_day,
+            "date": current_date.isoformat() if current_date else "",
+            "para": para,
+            "parity": "",
+            "time": cell,
+            "cells": subjects,
+        })
+    return rows
+
+
+def _doc_rows(text, subject_count=0):
     """Собирает строки расписания из текста .doc.
 
-    В старом .doc нет готовой сетки: ячейки идут подряд, ряды разделяются знаком
-    конца строки, который тоже выглядит как разделитель ячеек. Зато строку можно
-    найти по метке недели: у каждой строки есть «Чет» или «Неч», а перед ней
-    стоят дата и номер пары, после — время и ячейки занятий. Ширина строки
-    вычисляется по расстоянию между временами пар.
+    Два макета:
+      * семестровый — у каждой строки есть метка «Чет» или «Неч», а перед ней
+        дата и номер пары (строку ищем по метке недели);
+      * с датами — метки недели отсутствуют, зато в строке стоит дата вида
+        «21сентября Понедельник» (заочники, сессии) — строку ищем по времени.
+
+    Ширина строки в старом .doc «плавает» из-за объединённых ячеек, поэтому
+    число столбцов занятий берётся из шапки (subject_count), а не из расстояний.
     """
     cells = [cell.strip() for cell in text.split("\t")]
     time_positions = [index for index, cell in enumerate(cells) if TIME_RE.search(cell)]
@@ -221,7 +310,14 @@ def _doc_rows(text):
         return [], 0
     strides = [later - earlier for earlier, later in
                zip(time_positions, time_positions[1:]) if later - earlier > 3]
-    row_width = min(strides) if strides else 6
+    stride = min(strides) if strides else 6
+    if subject_count <= 0:
+        subject_count = max(1, stride - 3)
+    row_width = subject_count + 4
+    has_parity = any(cell.lower() in ("чет", "неч") for cell in cells)
+    if not has_parity:
+        return _dated_rows(cells, subject_count), row_width
+
     rows = []
     current_day = ""
     for index, cell in enumerate(cells):
@@ -237,6 +333,7 @@ def _doc_rows(text):
             current_day = chunk[0]
         rows.append({
             "day": current_day,
+            "date": "",
             "para": chunk[1],
             "parity": cell,
             "time": chunk[3],
@@ -245,43 +342,32 @@ def _doc_rows(text):
     return rows, row_width
 
 
-def _doc_columns(text, row_width):
-    """Столбцы занятий из шапки .doc: после «Время» идут коды групп и подгруппы."""
+def _doc_columns(text, row_width=0):
+    """Столбцы занятий из шапки .doc: после «Время» идут коды групп и подгруппы.
+
+    Ширина строки здесь не нужна: шапка короткая, поэтому просто идём по ячейкам
+    после слова «Время» и собираем коды групп, пока они попадают под шаблон.
+    """
     cells = [cell.strip() for cell in text.split("\t")]
     try:
-        time_index = next(index for index, cell in enumerate(cells[:60])
+        time_index = next(index for index, cell in enumerate(cells[:80])
                           if cell.lower() == "время")
     except StopIteration:
         return []
-    if row_width <= 4:
-        return []
-    tail = cells[time_index + 1:time_index + 1 + (row_width - 4) * 3]
     columns = []
-    current_group = ""
-    for position, value in enumerate(tail):
+    for value in cells[time_index + 1:time_index + 10]:
         if not value:
-            continue
-        if re.match(r"^\d{2}[А-Яа-яA-Za-z]{2,4}\d{0,2}[а-я]?$", value) or \
-                re.match(r"^[А-Яа-яA-Za-z]{2,6}[- ]?\d{2,3}[а-я]?$", value):
-            current_group = value
-            columns.append({"group": value, "subgroup": "", "index": 4 + len(columns)})
-        elif "подгруппа" in value.lower():
-            number = re.sub(r"\D+", "", value) or "1"
             if columns:
-                columns[-1]["subgroup"] = "Подгруппа %s" % number
-            else:
-                columns.append({"group": current_group, "subgroup": "Подгруппа %s" % number,
-                                "index": 4})
-    # Если подгруппы в шапке не указаны — оставляем по одному столбцу на группу
-    unique = []
-    seen = set()
-    for column in columns:
-        key = (column["group"], column["subgroup"])
-        if key in seen:
+                break
             continue
-        seen.add(key)
-        unique.append(column)
-    return unique
+        if GROUP_RE.match(value):
+            columns.append({"group": value, "subgroup": "", "index": 4 + len(columns)})
+        elif "подгруппа" in value.lower() and columns:
+            number = re.sub(r"\D+", "", value) or "1"
+            columns[-1]["subgroup"] = "Подгруппа %s" % number
+        else:
+            break
+    return columns
 
 
 def _pick_schedule_table(tables):
@@ -440,8 +526,29 @@ def parse_cell(text):
     if not source or source in ("·", "-", "—"):
         return None
     result = {"raw": source, "subject": "", "type": "", "teachers": [], "rooms": [],
-              "from_date": None, "to_date": None, "place": ""}
-    work = re.sub(r"[ \t\u00a0]+", " ", source)
+              "from_date": None, "to_date": None, "place": "", "note": ""}
+    # В одной ячейке иногда лежит объявление и пара (например «ОБЩЕЕ СОБРАНИЕ …»
+    # и следом «Математика (Лекции)»). Учебной считаем строку с типом занятия,
+    # остальное сохраняем как примечание, чтобы не смешивать преподавателей.
+    paragraphs = [re.sub(r"[ \t\u00a0]+", " ", part).strip()
+                  for part in source.split("\n")]
+    paragraphs = [part for part in paragraphs if part]
+    lesson_parts = [part for part in paragraphs
+                    if any(word in part.lower() for word in TYPE_WORDS)
+                    or TEACHER_RE.search(part)]
+    others = [part for part in paragraphs if part not in lesson_parts]
+    # Короткие «остатки» — это место проведения («КИТАП 2», «НОЦ Наследие»),
+    # длинные — объявления, их показываем отдельной строкой.
+    places = [part for part in others
+              if len(part) <= 30
+              and not any(word in part.lower() for word in ANNOUNCEMENT_WORDS)]
+    notes = [part for part in others if part not in places]
+    if lesson_parts:
+        result["note"] = " ".join(notes)[:120]
+        result["place"] = " ".join(places)[:60]
+        work = " ".join(lesson_parts)
+    else:
+        work = " ".join(paragraphs)
 
     # 1. Сроки действия: «С 28.09.26.» и «до 01.11.26.»
     from_match = FROM_RE.search(work)
@@ -534,10 +641,17 @@ def lessons_for_day(grid, group, day, subgroup=""):
 
     lessons = []
     for row in grid.get("rows") or []:
-        if (row.get("day") or "").strip() != weekday:
-            continue
-        if (row.get("parity") or "").strip() != weekday_parity:
-            continue
+        row_date = row.get("date") or ""
+        if row_date:
+            # В файлах с датами (заочники, сессии) чётность не нужна: строка
+            # относится к конкретному дню.
+            if row_date != day.isoformat():
+                continue
+        else:
+            if (row.get("day") or "").strip() != weekday:
+                continue
+            if (row.get("parity") or "").strip() != weekday_parity:
+                continue
         time_match = TIME_RE.search(row.get("time") or "")
         if not time_match:
             continue
