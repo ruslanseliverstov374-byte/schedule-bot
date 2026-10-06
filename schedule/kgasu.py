@@ -43,6 +43,8 @@ WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четв�
 
 TIME_RE = re.compile(r"(\d{1,2})[:.](\d{2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})[:.](\d{2})")
 FROM_RE = re.compile(r"[Сс]\s+(\d{2})\.(\d{2})\.(\d{2,4})")
+#: Дата без буквы «С» в начале ячейки: «07. 09.26. Физическая культура…»
+LEADING_DATE_RE = re.compile(r"^\s*(\d{2})\.\s*(\d{2})\.\s*(\d{2,4})")
 TO_RE = re.compile(r"до\s+(\d{2})\.(\d{2})\.(\d{2,4})")
 
 #: Код группы в шапке: «26ЗК01з», «26РП01», «25-ГМ01», «26АП07».
@@ -137,11 +139,15 @@ def filter_value(options, wanted, default=""):
     return default
 
 
-def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=None):
-    """Список групп с файлами расписания.
+def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=None,
+           max_pages=25):
+    """Список всех групп с файлами расписания.
+
+    Внимание: страница отдаёт по 20 файлов и разбита на страницы (у КГАСУ их около
+    девяти — 290 групп), поэтому обходим все страницы, а не только первую.
 
     Возвращает [{'name': '26РП01', 'file_url': ..., 'file_name': ..., 'file_ext': 'docx',
-                 'shared_with': ['26РП02'], 'institute': ''}].
+                 'shared_with': ['26РП02']}].
     """
     html = html or fetch_text(PAGE, timeout=60)
     params = {
@@ -150,22 +156,44 @@ def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=No
         "arrFilter_pf[SEMESTR]": filter_value(filter_options(html, "arrFilter_pf[SEMESTR]"), semester),
         "set_filter": "Y",
     }
-    listing = fetch_text(PAGE + "?" + urllib.parse.urlencode(params), timeout=60)
     pattern = re.compile(
         r'href="(https://st\.kgasu\.ru/[^"]+\.(?:docx?|xlsx?|pdf))"[^>]*>([^<]{1,120})</a>',
         re.I)
     result = []
-    for link, title in pattern.findall(listing):
-        title = re.sub(r"\s+", " ", title).strip()
-        codes = [code for code in re.split(r"[,\s]+", title) if code]
-        for code in codes:
-            result.append({
-                "name": code,
-                "file_url": link,
-                "file_name": link.split("/")[-1],
-                "file_ext": link.rsplit(".", 1)[-1].lower(),
-                "shared_with": [other for other in codes if other != code],
-            })
+    seen_files = set()
+    seen_groups = set()
+    base = PAGE + "?" + urllib.parse.urlencode(params)
+    for page_number in range(1, max_pages + 1):
+        url = base if page_number == 1 else "%s&PAGEN_1=%d" % (base, page_number)
+        try:
+            listing = fetch_text(url, timeout=60)
+        except KgasuError:
+            break
+        found = pattern.findall(listing)
+        if not found:
+            break
+        fresh = False
+        for link, title in found:
+            if link in seen_files:
+                continue
+            seen_files.add(link)
+            fresh = True
+            title = re.sub(r"\s+", " ", title).strip()
+            codes = [code for code in re.split(r"[,\s]+", title) if code]
+            for code in codes:
+                key = code.lower()
+                if key in seen_groups:
+                    continue
+                seen_groups.add(key)
+                result.append({
+                    "name": code,
+                    "file_url": link,
+                    "file_name": link.split("/")[-1],
+                    "file_ext": link.rsplit(".", 1)[-1].lower(),
+                    "shared_with": [other for other in codes if other != code],
+                })
+        if not fresh:
+            break
     return result
 
 
@@ -382,26 +410,41 @@ def _pick_schedule_table(tables):
 
 
 def _columns_from_rows(table):
-    """Индекс строки заголовка занятий и описание столбцов групп/подгрупп."""
+    """Индекс строки заголовка занятий и описание столбцов групп/подгрупп.
+
+    У КГАСУ код группы в шапке объединён на несколько столбцов (например «26ЗК01»
+    над колонками «Подгруппа 2» и «Подгруппа 1»), поэтому код тянется вправо,
+    а подгруппа берётся из второй строки шапки. Одинаковые пары столбцов
+    отбрасываются: иначе занятия дублировались бы.
+    """
     header_index = 0
     for index, row in enumerate(table[:5]):
         flat = " ".join(row).lower()
-        if "время" in flat and "неделя" in flat:
+        if "время" in flat and ("неделя" in flat or "номер" in flat):
             header_index = index
             break
     header = table[header_index] if header_index < len(table) else []
     subgroup_row = table[header_index + 1] if header_index + 1 < len(table) else []
+    # Если следующая строка — уже данные (день недели), значит подгрупп нет
+    if subgroup_row and str(subgroup_row[0]).strip() in WEEKDAYS:
+        subgroup_row = []
+
     columns = []
+    seen = set()
     current_group = ""
-    subgroup_seen = {}
-    for position in range(4, max(len(header), len(subgroup_row))):
+    width = max(len(header), len(subgroup_row))
+    for position in range(4, width):
         group = (header[position] or "").strip() if position < len(header) else ""
         if group:
             current_group = group
-            subgroup_seen[current_group] = 0
-        subgroup = (subgroup_row[position] or "").strip() if position < len(subgroup_row) else ""
-        if subgroup:
-            subgroup_seen[current_group] = subgroup_seen.get(current_group, 0) + 1
+        subgroup = ((subgroup_row[position] or "").strip()
+                    if position < len(subgroup_row) else "")
+        if not current_group:
+            continue
+        key = (current_group.lower(), subgroup.lower())
+        if key in seen:
+            continue
+        seen.add(key)
         columns.append({"group": current_group, "subgroup": subgroup,
                         "index": position})
     return header_index, columns
@@ -550,8 +593,8 @@ def parse_cell(text):
     else:
         work = " ".join(paragraphs)
 
-    # 1. Сроки действия: «С 28.09.26.» и «до 01.11.26.»
-    from_match = FROM_RE.search(work)
+    # 1. Сроки действия: «С 28.09.26.», «07. 09.26.» в начале и «до 01.11.26.»
+    from_match = FROM_RE.search(work) or LEADING_DATE_RE.search(work)
     if from_match:
         result["from_date"] = parse_short_date("%s.%s.%s" % from_match.groups())
         work = work[:from_match.start()] + " " + work[from_match.end():]
