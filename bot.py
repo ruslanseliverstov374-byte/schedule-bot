@@ -293,6 +293,13 @@ class ScheduleBot:
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
         if not text:
+            # Служебные сообщения (закрепление копии базы, смена названия чата и т.п.)
+            # приходят без текста — отвечать на них нельзя, иначе бот «разговаривает»
+            # сам с собой: например, после каждой резервной копии писал
+            # «Пока я понимаю только текст и кнопки».
+            if is_service_message(message):
+                self.log("Служебное сообщение (%s) — не отвечаю" % service_kind(message))
+                return
             self.tg.send_message(chat_id, "Пока я понимаю только текст и кнопки 🙂")
             return
         self.log("→ %s (%s): %s" % (chat_id, user.get("group_title") or "без группы",
@@ -1177,6 +1184,35 @@ class ScheduleBot:
 
 
 # ------------------------------------------------------------ парсинг текста
+
+#: Поля служебных сообщений Telegram: закрепление, смена названия/аватара чата и т.п.
+#: Такие апдейты приходят без текста, и отвечать на них нельзя.
+SERVICE_MESSAGE_KEYS = (
+    "pinned_message", "new_chat_title", "new_chat_photo", "delete_chat_photo",
+    "new_chat_members", "left_chat_member", "group_chat_created",
+    "supergroup_chat_created", "channel_chat_created", "migrate_to_chat_id",
+    "migrate_from_chat_id", "message_auto_delete_timer_changed", "video_chat_started",
+    "video_chat_ended", "video_chat_scheduled", "video_chat_participants_invited",
+    "forum_topic_created", "forum_topic_closed", "forum_topic_reopened",
+    "proximity_alert_triggered", "write_access_allowed", "successful_payment",
+    "passport_data", "web_app_data", "users_shared", "chat_shared", "boost_added",
+)
+
+
+def service_kind(message):
+    """Название служебного поля сообщения (для лога)."""
+    for key in SERVICE_MESSAGE_KEYS:
+        if key in (message or {}):
+            return key
+    return "нет отправителя"
+
+
+def is_service_message(message):
+    """Служебное ли сообщение: без отправителя или с системным полем."""
+    if not (message or {}).get("from"):
+        return True
+    return any(key in message for key in SERVICE_MESSAGE_KEYS)
+
 
 def group_query_candidates(query):
     """Варианты запроса группы: как есть, без одного символа, без последнего.
