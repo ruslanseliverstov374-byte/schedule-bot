@@ -7,6 +7,7 @@
 
 from datetime import date, datetime
 
+from schedule import unifirst
 from schedule.unifirst import day_label, week_label
 
 # ------------------------------------------------------------- подписи кнопок
@@ -135,15 +136,105 @@ def lesson_block(lesson, index=None):
     return "\n".join(lines)
 
 
+def slot_block(block, index=None):
+    """Пара целиком: если она делится на подгруппы — показываем варианты выбора.
+
+    Раньше каждая подгруппа рисовалась отдельным блоком с одинаковым временем и
+    предметом, и расписание выглядело так, будто предмет задублирован.
+    """
+    lessons = (block or {}).get("lessons") or []
+    if not lessons:
+        return ""
+    if len(lessons) == 1:
+        return lesson_block(lessons[0], index)
+
+    head_parts = []
+    if index:
+        head_parts.append("%d." % index)
+    if block.get("para"):
+        head_parts.append("%s пара" % block["para"])
+    time_text = block.get("start") or ""
+    if time_text and block.get("end"):
+        time_text += "–" + block["end"]
+    if time_text:
+        head_parts.append(time_text)
+    lines = []
+    if head_parts:
+        lines.append("<b>%s</b>" % " · ".join(head_parts))
+
+    subjects = {(lesson.get("subject") or "").strip() for lesson in lessons}
+    if len(subjects) == 1:
+        first = lessons[0]
+        icon = TYPE_ICONS.get((first.get("type") or "").strip().lower(), "📘")
+        lines.append("%s %s%s" % (
+            icon, esc(first.get("subject")),
+            (" (%s)" % esc(first.get("type"))) if first.get("type") else ""))
+        lines.append("<i>🔀 делится на подгруппы — уточни свою:</i>")
+        for lesson in lessons:
+            who = esc(", ".join(lesson.get("teachers") or [])) or "преподаватель не указан"
+            rooms = esc(", ".join(lesson.get("rooms") or []))
+            lines.append("   • %s%s" % (who, (" · 🚪 " + rooms) if rooms else ""))
+        return "\n".join(lines)
+
+    # В одном слоте разные предметы — показываем каждый отдельно.
+    for lesson in lessons:
+        icon = TYPE_ICONS.get((lesson.get("type") or "").strip().lower(), "📘")
+        lines.append("%s %s%s" % (
+            icon, esc(lesson.get("subject")),
+            (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else ""))
+        if lesson.get("teachers"):
+            lines.append("   👤 " + esc(", ".join(lesson["teachers"])))
+        if lesson.get("rooms"):
+            lines.append("   🚪 " + esc(", ".join(lesson["rooms"])))
+    return "\n".join(lines)
+
+
+def slot_compact(block):
+    """Одна строка для недельного списка: с подгруппами — без дублей."""
+    lessons = (block or {}).get("lessons") or []
+    if not lessons:
+        return ""
+    para = block.get("para") or "•"
+    if len(lessons) == 1:
+        lesson = lessons[0]
+        bits = [("✏️ " + esc(lesson.get("subject", ""))).strip()]
+        if lesson.get("start"):
+            bits.append(lesson["start"])
+        if lesson.get("rooms"):
+            bits.append(esc(", ".join(lesson["rooms"])))
+        if lesson.get("teachers"):
+            bits.append(esc(", ".join(lesson["teachers"])))
+        return "   <b>%s</b> %s" % (para, " · ".join(bits))
+
+    subjects = {(lesson.get("subject") or "").strip() for lesson in lessons}
+    subject = esc(lessons[0].get("subject", ""))
+    bits = []
+    if lessons[0].get("start"):
+        bits.append(lessons[0]["start"])
+    if len(subjects) == 1:
+        rooms = []
+        for lesson in lessons:
+            room = esc(", ".join(lesson.get("rooms") or []))
+            if room and room not in rooms:
+                rooms.append(room)
+        bits.append("подгруппы: %d" % len(lessons))
+        if rooms:
+            bits.append(" / ".join(rooms))
+    else:
+        subject = " · ".join(sorted(esc(item.get("subject", "")) for item in lessons))
+    return "   <b>%s</b> ✏️ %s · %s" % (para, subject, " · ".join(bits))
+
+
 def day_schedule(day, lessons, group_title, label=None):
-    """Подробное расписание одного дня."""
+    """Подробное расписание одного дня (с учётом деления на подгруппы)."""
     title = label or day_label(day)
     header = "📅 <b>%s</b>\n" % esc(title)
     if group_title:
         header += "Группа <b>%s</b>\n" % esc(group_title)
     if not lessons:
         return header + "\n🎉 Занятий нет — отдыхай!"
-    return header + "\n" + "\n\n".join(lesson_block(item) for item in lessons)
+    blocks = unifirst.group_by_slot(lessons)
+    return header + "\n" + "\n\n".join(slot_block(block) for block in blocks)
 
 
 def day_compact(day, lessons):
@@ -151,16 +242,8 @@ def day_compact(day, lessons):
     lines = ["<b>%s</b>" % esc(day_label(day))]
     if not lessons:
         return "\n".join(lines + ["   🎉 занятий нет"])
-    for lesson in lessons:
-        time_text = lesson.get("start") or ""
-        bits = [("✏️ " + esc(lesson.get("subject", ""))).strip()]
-        if time_text:
-            bits.append(time_text)
-        if lesson.get("rooms"):
-            bits.append(esc(", ".join(lesson["rooms"])))
-        if lesson.get("teachers"):
-            bits.append(esc(", ".join(lesson["teachers"])))
-        lines.append("   <b>%s</b> %s" % (lesson.get("para") or "•", " · ".join(bits)))
+    for block in unifirst.group_by_slot(lessons):
+        lines.append(slot_compact(block))
     return "\n".join(lines)
 
 
@@ -365,21 +448,35 @@ def evening_digest(user, day, lessons, homework, group_title):
     if not lessons:
         lines.append("🎉 Пар нет — можно отдыхать!")
     else:
-        lines.append("<b>%s</b>" % pair_word(len(lessons)).capitalize())
+        blocks = unifirst.group_by_slot(lessons)
+        lines.append("<b>%s</b>" % pair_word(len(blocks)).capitalize())
         lines.append("")
-        for lesson in lessons:
-            time_text = lesson.get("start") or ""
+        for block in blocks:
+            items = block["lessons"]
+            time_text = block.get("start") or ""
             first = "⏰ %s" % time_text if time_text else "⏰"
-            if lesson.get("para"):
-                first += " (%s пара)" % lesson["para"]
+            if block.get("para"):
+                first += " (%s пара)" % block["para"]
             lines.append(first)
-            lines.append("   📘 %s%s" % (
-                esc(lesson.get("subject")),
-                (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else ""))
-            if lesson.get("rooms"):
-                lines.append("   🚪 %s" % esc(", ".join(lesson["rooms"])))
-            if lesson.get("teachers"):
-                lines.append("   👤 %s" % esc(", ".join(lesson["teachers"])))
+            if len(items) == 1:
+                lesson = items[0]
+                lines.append("   📘 %s%s" % (
+                    esc(lesson.get("subject")),
+                    (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else ""))
+                if lesson.get("rooms"):
+                    lines.append("   🚪 %s" % esc(", ".join(lesson["rooms"])))
+                if lesson.get("teachers"):
+                    lines.append("   👤 %s" % esc(", ".join(lesson["teachers"])))
+            else:
+                # Пара делится на подгруппы: пишем предмет один раз и варианты.
+                lines.append("   📘 %s%s" % (
+                    esc(items[0].get("subject")),
+                    (" (%s)" % esc(items[0].get("type"))) if items[0].get("type") else ""))
+                lines.append("   🔀 подгруппы — уточни свою:")
+                for lesson in items:
+                    who = esc(", ".join(lesson.get("teachers") or [])) or "преподаватель?"
+                    rooms = esc(", ".join(lesson.get("rooms") or []))
+                    lines.append("      • %s%s" % (who, (" · 🚪 " + rooms) if rooms else ""))
             lines.append("")
     if homework:
         lines.append("📝 <b>Не забудь сдать:</b>")
@@ -390,17 +487,18 @@ def evening_digest(user, day, lessons, homework, group_title):
 
 
 def before_lesson_reminder(minutes, lesson):
-    time_text = lesson.get("start") or ""
-    return ("🔔 <b>Через %d %s — %s</b>\n"
-            "📘 %s%s\n"
-            "%s%s" % (
-                minutes, plural(minutes, "минута", "минуты", "минут"),
-                esc(time_text) if time_text else "пара",
-                esc(lesson.get("subject")),
-                (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else "",
-                ("🚪 %s\n" % esc(", ".join(lesson["rooms"]))) if lesson.get("rooms") else "",
-                ("👤 %s" % esc(", ".join(lesson["teachers"]))) if lesson.get("teachers") else "",
-            )).strip()
+    """Напоминание перед парой. Принимает и одну пару, и блок подгрупп."""
+    items = lesson.get("lessons") if isinstance(lesson, dict) and "lessons" in lesson else [lesson]
+    block = lesson if isinstance(lesson, dict) and "lessons" in lesson else {}
+    start = block.get("start") or (items[0].get("start") if items else "")
+    head = "🔔 <b>Через %d %s%s</b>" % (
+        minutes, plural(minutes, "минута", "минуты", "минут"),
+        (" — %s" % esc(start)) if start else "")
+    body = slot_block({"para": block.get("para"),
+                       "start": start,
+                       "end": block.get("end"),
+                       "lessons": items}) if len(items) > 1 else lesson_block(items[0])
+    return head + "\n" + body
 
 
 def homework_deadline_reminder(items):
