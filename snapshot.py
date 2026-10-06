@@ -51,6 +51,13 @@ META_SAVES_COUNT = "snapshot_saves_count"
 #: Сколько секунд между проверками в фоновом потоке.
 CHECK_INTERVAL_SECONDS = 60
 
+#: Через сколько секунд после важного изменения (ДЗ, смена группы) обновить копию.
+#: Небольшая задержка объединяет несколько быстрых правок в одну копию.
+SAVE_REQUEST_DELAY_SECONDS = 45
+
+#: Минимальная пауза между копиями по запросу — чтобы не дёргать Telegram зря.
+MIN_SAVE_GAP_SECONDS = 90
+
 #: Свой заголовок файла SQLite.
 SQLITE_MAGIC = b"SQLite format 3"
 
@@ -319,6 +326,7 @@ class SnapshotManager:
         self._thread = None
         self._stopping = False
         self._signature = None
+        self._save_requested = 0
         self._load_meta()
 
     # ------------------------------------------------------------ состояние
@@ -438,41 +446,73 @@ class SnapshotManager:
             self._fail("не удалось подготовить файл копии: %s" % err)
             return False
 
+        previous_id = self._stored_message_id()
         try:
-            try:
-                message = self.tg.send_document(
-                    self.owner_id, temp_path, caption=caption, filename=BACKUP_FILENAME,
-                    disable_notification=True)   # копии не должны звонить в чат
-            except Exception as err:
-                self._fail("не удалось отправить копию в чат: %s" % err)
-                return False
+            message = None
+            edited = False
+            if previous_id and hasattr(self.tg, "edit_document"):
+                # Копия уже есть в чате: обновляем её, а не шлём новую —
+                # иначе чат засоряется сообщениями каждые полчаса.
+                try:
+                    message = self.tg.edit_document(
+                        self.owner_id, previous_id, temp_path,
+                        caption=caption, filename=BACKUP_FILENAME)
+                    edited = True
+                except Exception as err:
+                    self.log("не удалось обновить прежнюю копию (%s) — отправляю новую" % err)
+                    message = None
+            if message is None:
+                try:
+                    message = self.tg.send_document(
+                        self.owner_id, temp_path, caption=caption, filename=BACKUP_FILENAME,
+                        disable_notification=True)   # копии не должны звонить в чат
+                except Exception as err:
+                    self._fail("не удалось отправить копию в чат: %s" % err)
+                    return False
         finally:
             _remove(temp_path)
 
-        message_id = _message_id_of(message)
+        message_id = _message_id_of(message) or (previous_id if edited else None)
         if not message_id:
             self._fail("Telegram не вернул id сообщения с копией")
             return False
 
         # Закрепление и удаление прошлой копии — вспомогательные шаги: их сбой
         # не должен отменять уже сделанное сохранение, поэтому только логируем.
-        self._pin(message_id)
-        previous_id = self._stored_message_id()
-        if previous_id and previous_id != message_id:
-            self._delete(previous_id)
+        if not edited:
+            self._pin(message_id)
+            if previous_id and previous_id != message_id:
+                self._delete(previous_id)
 
         self.message_id = message_id
         self.last_error = ""
         self.last_saved_at = time.time()
         self.saves_count += 1
+        self._save_requested = 0
         self._set_meta(META_MESSAGE_ID, message_id)
         self._set_meta(META_SAVED_AT, datetime.fromtimestamp(
             self.last_saved_at, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         self._set_meta(META_SAVES_COUNT, self.saves_count)
         self._signature = self._signature_of_db()
-        self.log("копия базы закреплена в чате владельца: %d КБ, сообщение %s"
-                 % (len(blob) // 1024, message_id))
+        if edited:
+            self.log("копия базы обновлена в прежнем сообщении: %d КБ, сообщение %s"
+                     % (len(blob) // 1024, message_id))
+        else:
+            self.log("копия базы закреплена в чате владельца: %d КБ, сообщение %s"
+                     % (len(blob) // 1024, message_id))
         return True
+
+    def request_save(self, delay_seconds=SAVE_REQUEST_DELAY_SECONDS):
+        """Попросить сохранить базу после важных изменений (ДЗ, смена группы).
+
+        Раньше копия делалась строго раз в полчаса, и на бесплатном хостинге
+        правки могли пропасть при засыпании сервиса. Теперь копия обновляется
+        в прежнем (уже закреплённом) сообщении — чат от этого не засоряется.
+        """
+        moment = time.time() + max(0, delay_seconds)
+        if not self._save_requested or moment < self._save_requested:
+            self._save_requested = moment
+        return self._save_requested
 
     def _pin(self, message_id):
         try:
@@ -560,8 +600,21 @@ class SnapshotManager:
             return
         while not self._stopping:
             try:
+                self._save_if_requested()
                 self.maybe_save()
             except Exception as err:
                 self._fail("ошибка автосохранения: %s" % err)
             if self._sleep(CHECK_INTERVAL_SECONDS):
                 return
+
+    def _save_if_requested(self):
+        """Сохранение по запросу (после добавления ДЗ, смены группы и т.п.)."""
+        moment = self._save_requested
+        if not moment:
+            return False
+        now = time.time()
+        if now < moment:
+            return False
+        if self.last_saved_at and now - self.last_saved_at < MIN_SAVE_GAP_SECONDS:
+            return False           # слишком часто не дёргаем: подождём следующей проверки
+        return self.save(force=True)
