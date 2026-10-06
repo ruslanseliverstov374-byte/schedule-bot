@@ -94,14 +94,15 @@ def read_token(cli_token=None, token_file=None):
     return ""
 
 
-def make_logger(log_path=LOG_FILE):
+def make_logger(log_path=LOG_FILE, prefix=""):
+    """Лог в консоль и файл. prefix нужен, когда в одном процессе два бота."""
     directory = os.path.dirname(log_path)
     if directory:
         os.makedirs(directory, exist_ok=True)
 
     def log(message):
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = "[%s] %s" % (stamp, message)
+        line = "[%s]%s %s" % (stamp, (" " + prefix) if prefix else "", message)
         try:
             print(line, flush=True)
         except Exception:
@@ -473,8 +474,15 @@ class ScheduleBot:
     def settings_keyboard(self, user):
         evening = "🔕 Выключить" if user.get("evening_enabled") else "🌙 Включить"
         before = user.get("before_minutes") or 0
-        return tgbot.inline([
+        rows = [
             [tgbot.btn("🎓 Сменить группу", "st:group")],
+        ]
+        # У КГАСУ группа делится на подгруппы прямо в файле расписания —
+        # даём поменять свою в любой момент.
+        if self.provider_subgroups(user.get("group_title") or ""):
+            rows.append([tgbot.btn("🔀 Подгруппа: %s" % (user.get("subgroup") or "все"),
+                                   "st:subgroup")])
+        rows.extend([
             [tgbot.btn(evening, "st:evening"),
              tgbot.btn("🕒 Время: %s" % user.get("evening_time"), "st:time")],
             [tgbot.btn("🔔 Перед парой: %s" % ("выкл" if not before else "%d мин" % before),
@@ -487,6 +495,7 @@ class ScheduleBot:
              tgbot.btn("🔔 Все напоминания", "st:loud")],
             [tgbot.btn("ℹ️ Помощь", "help"), tgbot.btn("🏠 Меню", "menu")],
         ])
+        return tgbot.inline(rows)
 
     # ------------------------------------------------------------ команды
 
@@ -654,6 +663,7 @@ class ScheduleBot:
         self.tg.send_chat_action(chat_id)
         lessons, online = self.lessons_of(chat_id, user, day)
         day_lessons = [item for item in lessons if item.get("date") == day.isoformat()]
+        day_lessons = providers.filter_by_subgroup(day_lessons, user.get("subgroup"))
         text = texts.day_schedule(day, day_lessons, user.get("group_title"))
         note = texts.cache_note(online=online)
         if note:
@@ -679,7 +689,8 @@ class ScheduleBot:
             row = self.store.get_timetable(group_title, year, week)
             lessons = row["lessons"] if row else []
             online = False
-        text = texts.week_schedule(lessons, group_title, year, week)
+        text = texts.week_schedule(providers.filter_by_subgroup(lessons, user.get("subgroup")),
+                                   group_title, year, week)
         note = texts.cache_note(online=online)
         if note:
             text += "\n\n" + note
@@ -769,6 +780,61 @@ class ScheduleBot:
         self.touched_data()
         self.tg.send_message(chat_id, "✅ Группа <b>%s</b> выбрана!" % texts.esc(name),
                              reply_markup=self.main_keyboard())
+        # Если расписание делит группу на подгруппы (у КГАСУ это колонки файла),
+        # сразу спрашиваем, какая подгруппа у студента.
+        if self.ask_subgroup(chat_id, fresh):
+            return
+        self.send_day(chat_id, fresh, self.local_today(fresh))
+
+    # ------------------------------------------------------------- подгруппы
+
+    def provider_subgroups(self, group_title):
+        """Подгруппы группы по данным источника расписания."""
+        getter = getattr(self.provider, "subgroups_of", None)
+        if not getter or not group_title:
+            return []
+        try:
+            return list(getter(group_title) or [])
+        except Exception as error:
+            self.log("Не удалось получить подгруппы %s: %s" % (group_title, error))
+            return []
+
+    def ask_subgroup(self, chat_id, user, subgroups=None):
+        """Спрашивает, в какой подгруппе учится студент. True — вопрос задан."""
+        group_title = (user or {}).get("group_title") or ""
+        subgroups = subgroups if subgroups is not None else self.provider_subgroups(group_title)
+        if not subgroups:
+            return False
+        rows = [[tgbot.btn("🔀 %s" % label, "sub:%d" % index)]
+                for index, label in enumerate(subgroups)]
+        rows.append([tgbot.btn("Показывать оба варианта", "sub:-1")])
+        self.store.set_state(user["tg_id"], "subgroup")
+        self.tg.send_message(
+            chat_id,
+            "🔀 <b>В какой ты подгруппе?</b>\n\n"
+            "Часть занятий у группы идёт отдельно по подгруппам (язык, графика, "
+            "физкультура). Выбери свою — бот будет показывать её вариант, а общие "
+            "пары останутся для всей группы.\n\n"
+            "<i>Если не знаешь: посмотри преподавателя своей пары или спроси "
+            "у старосты. Можно оставить оба варианта.</i>",
+            reply_markup=tgbot.inline(rows))
+        return True
+
+    def apply_subgroup_label(self, chat_id, user, index):
+        """Сохранение выбранной подгруппы (index < 0 — показывать все варианты)."""
+        group_title = user.get("group_title") or ""
+        subgroups = self.provider_subgroups(group_title)
+        label = subgroups[index] if 0 <= index < len(subgroups) else ""
+        self.store.update_user(user["tg_id"], subgroup=label)
+        self.store.set_state(user["tg_id"], "")
+        self.touched_data()
+        fresh = self.store.get_user(user["tg_id"])
+        if label:
+            text = ("🔀 Подгруппа: <b>%s</b>.\nПоказываю её вариант; общие пары "
+                    "остаются для всей группы." % texts.esc(label))
+        else:
+            text = "🔀 Показываю оба варианта подгрупп."
+        self.tg.send_message(chat_id, text, reply_markup=self.main_keyboard())
         self.send_day(chat_id, fresh, self.local_today(fresh))
 
     def finish_evening_time(self, chat_id, user, text):
@@ -936,6 +1002,8 @@ class ScheduleBot:
                 self.apply_group(chat_id, user, group)
         elif head == "sg":
             self.apply_subgroup(chat_id, user, int(parts[1]), int(parts[2]), message_id)
+        elif head == "sub":
+            self.apply_subgroup_label(chat_id, user, int(parts[1]))
         elif head == "wk":
             self.send_week(chat_id, user, int(parts[1]), int(parts[2]))
         elif head == "r":
@@ -1082,6 +1150,9 @@ class ScheduleBot:
     def route_settings_callback(self, chat_id, user, action, message_id):
         if action == "group":
             self.send_group_page(chat_id, user, 0)
+            return
+        if action == "subgroup":
+            self.ask_subgroup(chat_id, user)
             return
         if action == "evening":
             self.store.update_user(user["tg_id"],
