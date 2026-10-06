@@ -131,9 +131,15 @@ class ScheduleBot:
         self.api = api or unifirst.Unifirst()
         self.tg = telegram or tgbot.Telegram(token)
         # Источник расписания выбирается переменной UNIVERSITY (unifirst или kgasu):
-        # одна кодовая база обслуживает оба вуза.
-        self.provider = provider or providers.make_provider(
-            university or env_value("UNIVERSITY", "unifirst"), store=self.store)
+        # одна кодовая база обслуживает оба вуза. Если провайдер передан снаружи
+        # (например в тестах с офлайн-моком), используем его как есть.
+        if provider is not None:
+            self.provider = provider
+        elif (university or env_value("UNIVERSITY", "unifirst")).strip().lower() in (
+                "kgasu", "кгасу"):
+            self.provider = providers.KgasuProvider(store=self.store)
+        else:
+            self.provider = providers.UnifirstProvider(self.api)
         self.engine = ReminderEngine(self.store, self.api, self.tg, logger=logger,
                                      refresh_minutes=refresh_minutes,
                                      provider=self.provider)
@@ -172,6 +178,13 @@ class ScheduleBot:
             if self.port:
                 self.start_status_page()
         self.refresh_groups_cache(force=self.store.groups_count() == 0)
+        # Если вуз у бота сменился (например база приехала от другого источника),
+        # список групп нужно загрузить заново — иначе студент не найдёт свою группу.
+        if self.store.get_meta("provider") != self.provider.name:
+            self.log("Источник расписания: %s — обновляю список групп"
+                     % self.provider.name)
+            self.refresh_groups_cache(force=True)
+            self.store.set_meta("provider", self.provider.name)
         self.start_snapshot()
 
     # ------------------------------------------------- облако: вебхук и копии
@@ -518,7 +531,7 @@ class ScheduleBot:
             try:
                 lessons, changed, old_lessons = self.engine.ensure_week(
                     group_title, target_year, target_week, force=True)
-            except unifirst.UnifirstError as error:
+            except (unifirst.UnifirstError, providers.ProviderError) as error:
                 self.tg.send_message(chat_id, "😔 Сайт расписания не отвечает: %s" % texts.esc(error),
                                      reply_markup=self.main_keyboard())
                 return
@@ -630,7 +643,7 @@ class ScheduleBot:
         try:
             lessons, _, _ = self.engine.ensure_week(group_title, year, week)
             return lessons, True
-        except unifirst.UnifirstError as error:
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("API недоступен для %s: %s" % (group_title, error))
             row = self.store.get_timetable(group_title, year, week)
             return (row["lessons"] if row else []), False
@@ -661,7 +674,7 @@ class ScheduleBot:
         try:
             lessons, _, _ = self.engine.ensure_week(group_title, year, week)
             online = True
-        except unifirst.UnifirstError as error:
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("API недоступен: %s" % error)
             row = self.store.get_timetable(group_title, year, week)
             lessons = row["lessons"] if row else []
@@ -901,7 +914,7 @@ class ScheduleBot:
             if "message is not modified" not in str(error):
                 self.log("Ошибка колбэка %s: %s" % (data, error))
                 self.tg.send_message(chat_id, texts.error_generic(str(error)))
-        except unifirst.UnifirstError as error:
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.tg.send_message(chat_id, texts.error_generic(str(error)))
         except Exception as error:
             self.log("Сбой колбэка %s: %s\n%s" % (data, error, traceback.format_exc(limit=3)))
@@ -1171,7 +1184,7 @@ class ScheduleBot:
                     try:
                         self.engine.ensure_week(group_title, year, week, force=True)
                         updated += 1
-                    except unifirst.UnifirstError:
+                    except (unifirst.UnifirstError, providers.ProviderError):
                         errors += 1
             self.engine.send_change_alerts()
             self.tg.send_message(chat_id, "♻️ Обновлено недель: <b>%d</b>, ошибок: %d"
@@ -1372,7 +1385,7 @@ def run_checks(db_path=DEFAULT_DB, logger=print):
     api = unifirst.Unifirst()
     try:
         groups = api.groups(limit=500)
-    except unifirst.UnifirstError as error:
+    except (unifirst.UnifirstError, providers.ProviderError) as error:
         groups = []
         problems.append("API недоступен: %s" % error)
     logger("   групп получено: %d" % len(groups))
@@ -1387,7 +1400,7 @@ def run_checks(db_path=DEFAULT_DB, logger=print):
         logger("2. Беру расписание группы %s на неделю %d/%d..." % (title, year, week))
         try:
             lessons = unifirst.normalize(api.timetable(title, year, week))
-        except unifirst.UnifirstError as error:
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             problems.append("расписание не получено: %s" % error)
         logger("   пар на неделе: %d" % len(lessons))
         for lesson in lessons[:3]:
