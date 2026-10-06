@@ -177,11 +177,14 @@ def slot_block(block, index=None):
             lines.append("   • %s%s" % (who, (" · 🚪 " + rooms) if rooms else ""))
         return "\n".join(lines)
 
-    # В одном слоте разные предметы — показываем каждый отдельно.
+    # В одном слоте разные предметы — значит это варианты по подгруппам:
+    # показываем каждый отдельно и подписываем, чья это подгруппа.
     for lesson in lessons:
         icon = TYPE_ICONS.get((lesson.get("type") or "").strip().lower(), "📘")
-        lines.append("%s %s%s" % (
-            icon, esc(lesson.get("subject")),
+        subgroup = (lesson.get("subgroup") or "").strip()
+        prefix = "[%s] " % esc(subgroup) if subgroup and "/" not in subgroup else ""
+        lines.append("%s %s%s%s" % (
+            icon, prefix, esc(lesson.get("subject")),
             (" (%s)" % esc(lesson.get("type"))) if lesson.get("type") else ""))
         if lesson.get("teachers"):
             lines.append("   👤 " + esc(", ".join(lesson["teachers"])))
