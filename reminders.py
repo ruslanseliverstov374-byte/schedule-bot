@@ -15,7 +15,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 import texts
-from schedule import unifirst
+from schedule import providers, unifirst
 
 #: Сколько минут после назначенного времени ещё допустимо отправить напоминание.
 #: Позже — уже неактуально: сервис мог проснуться ночью, и «вчерашний» дайджест
@@ -26,9 +26,11 @@ HOMEWORK_GRACE_MINUTES = 210
 
 class ReminderEngine:
     def __init__(self, store, api, telegram, logger=print, refresh_minutes=20,
-                 tick_seconds=30, sleep=time.sleep):
+                 tick_seconds=30, sleep=time.sleep, provider=None):
         self.store = store
         self.api = api
+        # Источник расписания: у ПГУФКСиТ это API сайта, у КГАСУ — файлы Word.
+        self.provider = provider or providers.UnifirstProvider(api)
         self.tg = telegram
         self.log = logger
         self.refresh_minutes = refresh_minutes
@@ -87,8 +89,7 @@ class ReminderEngine:
         if not force and age is not None and age < self.refresh_minutes:
             row = self.store.get_timetable(group_title, year, week)
             return row["lessons"], False, row["lessons"]
-        payload = self.api.timetable(group_title, year, week)
-        lessons = unifirst.normalize(payload)
+        lessons, payload = self.provider.week_lessons(group_title, year, week, force=force)
         new_digest = unifirst.digest(lessons)
         old = self.store.get_timetable(group_title, year, week)
         old_lessons = old["lessons"] if old else None
@@ -128,7 +129,7 @@ class ReminderEngine:
                     if changed:
                         self.log("Расписание %s изменилось (%d, неделя %d)"
                                  % (group_title, year, week))
-                except unifirst.UnifirstError as error:
+                except (unifirst.UnifirstError, providers.ProviderError) as error:
                     self.log("Не удалось обновить %s (%d/%d): %s"
                              % (group_title, year, week, error))
 
@@ -253,7 +254,7 @@ class ReminderEngine:
         year, week = unifirst.iso_year_week(day)
         try:
             lessons, _, _ = self.ensure_week(group_title, year, week)
-        except unifirst.UnifirstError as error:
+        except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("Расписание %s (%d/%d) недоступно: %s"
                      % (group_title, year, week, error))
             row = self.store.get_timetable(group_title, year, week)
