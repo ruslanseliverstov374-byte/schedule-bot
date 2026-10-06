@@ -61,11 +61,11 @@ def pair_word(number):
 
 # ------------------------------------------------------------------ онбординг
 
-def hello(first_name=""):
+def hello(first_name="", university="Поволжского ГУФКСиТ", city="Казань"):
     name = (", " + esc(first_name)) if first_name else ""
     return (
         "👋 Привет%s!\n\n"
-        "Я бот расписания <b>Поволжского ГУФКСиТ</b> (Казань).\n"
+        "Я бот расписания <b>%s</b> (%s).\n"
         "Показываю пары прямо с официального сайта расписания — всегда актуальные, "
         "с аудиториями и преподавателями.\n\n"
         "Что умею:\n"
@@ -73,16 +73,17 @@ def hello(first_name=""):
         "📝 общая домашка группы и личные заметки\n"
         "⏰ напоминания вечером и перед парой\n"
         "🔔 сообщу, если расписание поменяют\n\n"
-        "<b>Выбери свою группу</b> — и всё заработает." % name)
+        "<b>Выбери свою группу</b> — и всё заработает."
+        % (name, esc(university), esc(city)))
 
 
-def group_list_page(groups, page, pages, query="", current=""):
+def group_list_page(groups, page, pages, query="", current="", example="26281"):
     header = "🎓 <b>Выбор группы</b>\n\n"
     if query:
         header += "Поиск: <b>%s</b>\n" % esc(query)
     else:
         header += ("Найди свою группу в списке или просто напиши её номер "
-                   "(например <code>26281</code>).\n")
+                   "(например <code>%s</code>).\n" % esc(example))
     if not groups:
         return (header + "\n😕 Ничего не нашлось. Напиши номер группы иначе — "
                 "например только цифры.", [])
