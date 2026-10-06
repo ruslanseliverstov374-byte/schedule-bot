@@ -253,6 +253,43 @@ def restore_bytes(blob, db_path):
         return False
 
 
+def remember_source(db_path, pinned, logger=print):
+    """Запомнить, из какого сообщения восстановлена база.
+
+    Без этого после перезапуска бот считал закреплённым предыдущее (уже удалённое)
+    сообщение, не мог обновить его и отправлял новое — то есть каждый перезапуск
+    добавлял в чат лишнюю копию и служебное сообщение о закреплении.
+    """
+    log = logger or (lambda message: None)
+    message_id = _message_id_of(pinned)
+    if not message_id:
+        return False
+    stamp = pinned.get("date")
+    if stamp:
+        saved_at = datetime.fromtimestamp(int(stamp), timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S")
+    else:
+        saved_at = _utc_text()
+    try:
+        connection = sqlite3.connect(db_path, timeout=15)
+        try:
+            for key, value in ((META_MESSAGE_ID, str(message_id)),
+                               (META_SAVED_AT, saved_at)):
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value))
+            connection.commit()
+        finally:
+            connection.close()
+    except sqlite3.Error as err:
+        log("не удалось запомнить сообщение с копией: %s" % err)
+        return False
+    log("копия взята из сообщения %s — следующее сохранение обновит именно его"
+        % message_id)
+    return True
+
+
 def restore_from_chat(tg, owner_id, db_path, logger=print):
     """Найти у владельца ЗАКРЕПЛЁННОЕ сообщение с копией и восстановить базу.
 
@@ -279,6 +316,7 @@ def restore_from_chat(tg, owner_id, db_path, logger=print):
             blob = handle.read()
 
         if restore_bytes(blob, db_path):
+            remember_source(db_path, pinned, log)
             log("база восстановлена из закреплённой копии в чате владельца (%d КБ)"
                 % (len(blob) // 1024))
             return True
