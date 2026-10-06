@@ -1,5 +1,10 @@
 # Секреты и данные — НЕ в репозиторий
 token.txt
+token-kgasu.txt
+token*.txt
+*.token
+*.key
+*.pem
 .env
 data/
 logs/
