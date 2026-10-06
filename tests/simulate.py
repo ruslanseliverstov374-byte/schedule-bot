@@ -481,6 +481,42 @@ def main():
         check("фото от человека: один вежливый ответ",
               "только текст" in tg.joined(100), tg.joined(100)[:160])
 
+        print("\n14. Подгруппы: одна пара вместо «дублей»")
+        # Вуз делит группу на подгруппы (язык, информатика, физкультура): сайт отдаёт
+        # несколько строк с одним временем и предметом, но разными преподавателями.
+        # Для студента это одна пара с выбором, а не две одинаковые.
+        all_lessons = unifirst.normalize(payload)
+        split_blocks = [block for block in unifirst.group_by_slot(all_lessons)
+                        if len(block["lessons"]) > 1]
+        check("в расписании есть пары с подгруппами", bool(split_blocks), len(split_blocks))
+        if split_blocks:
+            block = split_blocks[0]
+            subject = block["lessons"][0]["subject"]
+            rendered = texts.slot_block(block)
+            check("подгруппы: предмет показан один раз", rendered.count(subject) == 1,
+                  rendered[:220])
+            variants = [", ".join(item.get("teachers") or []) for item in block["lessons"]]
+            check("подгруппы: видны все варианты",
+                  all(who and who in rendered for who in variants), variants)
+            check("подгруппы: есть пояснение про выбор",
+                  "подгрупп" in rendered.lower(), rendered[:160])
+
+            day_lessons = [item for item in all_lessons if item["date"] == block["date"]]
+            day_text = texts.day_schedule(date.fromisoformat(block["date"]), day_lessons,
+                                          "26281")
+            check("день: предмет подгрупп не задублирован", day_text.count(subject) == 1,
+                  day_text[:220])
+            compact = texts.day_compact(date.fromisoformat(block["date"]), day_lessons)
+            check("недельный вид: подгруппы идут одной строкой", compact.count(subject) == 1,
+                  compact[:220])
+            digest = texts.evening_digest({}, date.fromisoformat(block["date"]), day_lessons,
+                                          [], "26281")
+            check("вечерний дайджест: без дублей", digest.count(subject) == 1, digest[:220])
+            reminder = texts.before_lesson_reminder(30, block)
+            check("перед парой: одно напоминание на подгруппы",
+                  reminder.count(subject) == 1 and "подгрупп" in reminder.lower(),
+                  reminder[:220])
+
     finally:
         try:
             mock.stop()
