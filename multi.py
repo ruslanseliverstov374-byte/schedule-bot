@@ -157,14 +157,19 @@ def main(argv=None):
         print("Ни один бот не запущен — проверьте токены.")
         return 2
 
-    # Первый бот (с вебхуком) — в главном потоке, остальные — в своих.
-    for bot, entry in bots[1:]:
+    # Все боты запускаются в отдельных потоках, главный поток держит процесс живым.
+    # Первый бот (с вебхуком) занимает порт, остальные работают опросом Telegram.
+    threads = []
+    for bot, entry in bots:
         thread = threading.Thread(target=_run_bot, args=(bot, entry, entries),
                                   name="bot-%s" % bot.provider.name, daemon=True)
         thread.start()
+        threads.append(thread)
         _watch(entry, entries, thread)
     try:
-        return _run_bot(bots[0][0], bots[0][1], entries)
+        for thread in threads:
+            thread.join()
+        return 0
     finally:
         for bot, _ in bots:
             try:
