@@ -429,6 +429,14 @@ def check_manager(workdir, logs):
           manager.db_path == os.path.abspath(db)
           and Store(db).get_user(555) is not None)
 
+    # После восстановления бот обязан запомнить, из какого сообщения взята копия:
+    # иначе он считает закреплённым предыдущее (уже удалённое) сообщение, не может
+    # его обновить и при каждом перезапуске отправляет новое.
+    saved_id = sqlite_rows(db, "SELECT value FROM meta WHERE key='snapshot_message_id'")
+    check("restore_from_chat(): запомнил id сообщения с копией",
+          bool(saved_id) and str(saved_id[0]["value"]) == str(tg.pinned_message["message_id"]),
+          saved_id)
+
     # Закреплённой копии нет — только понятный лог и False.
     tg.pinned_message = None
     logs.clear()
