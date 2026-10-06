@@ -274,6 +274,40 @@ def group_by_date(lessons):
     return result
 
 
+def group_by_slot(lessons):
+    """Пары одного слота (день + номер пары + время) — это подгруппы одной пары.
+
+    Вуз часто делит группу на подгруппы (язык, информатика, физкультура,
+    медицинские знания): сайт отдаёт каждую подгруппу отдельной строкой с тем же
+    временем, но другим преподавателем и аудиторией. Для студента это не две
+    разные пары, а одна — со своим вариантом.
+
+    Возвращает блоки:
+        [{'date': '2026-10-06', 'para': 1, 'start': '08:30', 'end': '09:50',
+          'lessons': [пара, пара, ...]}, ...]
+    """
+    blocks = []
+    positions = {}
+    for lesson in lessons or []:
+        key = (lesson.get("date"), lesson.get("para"), lesson.get("start"))
+        if key not in positions:
+            positions[key] = len(blocks)
+            blocks.append({
+                "date": lesson.get("date"),
+                "para": lesson.get("para"),
+                "start": lesson.get("start"),
+                "end": lesson.get("end"),
+                "lessons": [],
+            })
+        blocks[positions[key]]["lessons"].append(lesson)
+    return blocks
+
+
+def is_split_slot(block):
+    """Делится ли пара на подгруппы (несколько строк в одном слоте)."""
+    return len((block or {}).get("lessons") or []) > 1
+
+
 def diff_lessons(old_lessons, new_lessons):
     """Разница между двумя версиями недели.
 
