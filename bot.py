@@ -79,16 +79,28 @@ def snapshot_interval_minutes():
     return max(1, value // 60) if value > 120 else value
 
 
+def clean_token(value):
+    """Приводит токен бота к рабочему виду.
+
+    Случай из жизни: значение переменной на Render вставили в многострочное поле,
+    токен уехал с переводом строки в конце — бот не запускался, хотя переменная
+    выглядела заполненной. Поэтому убираем кавычки и все пробельные символы.
+    """
+    if not value:
+        return ""
+    return "".join(str(value).split()).strip('"').strip("'").strip()
+
+
 def read_token(cli_token=None, token_file=None):
     if cli_token:
-        return cli_token.strip()
+        return clean_token(cli_token)
     token = env_value("BOT_TOKEN")
     if token:
-        return token
+        return clean_token(token)
     for path in ([token_file] if token_file else []) + [TOKEN_FILE]:
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as handle:
-                value = handle.read().strip()
+                value = clean_token(handle.read())
                 if value:
                     return value
     return ""

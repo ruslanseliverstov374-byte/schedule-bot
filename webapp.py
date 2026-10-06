@@ -550,10 +550,30 @@ class _StatusHandler(BaseHTTPRequestHandler):
             # Обязан ответить всегда: к базе не обращаемся вовсе.
             self._plain(200, "ok", head_only=head_only)
             return
+        if path in ("/service.json", "/status.json"):
+            # Состояние всех ботов этого сервиса (пишет multi.py) — нужно, чтобы
+            # видеть снаружи, поднялся ли второй бот, не открывая панель Render.
+            self._service_json(head_only)
+            return
         if path == "/":
             self._page(head_only)
             return
         self._not_found(head_only)
+
+    def _service_json(self, head_only):
+        # Файл состояния пишет multi.py рядом с базой; путь берём от самого
+        # webapp.py, чтобы не тянуть сюда bot.py (иначе круговой импорт).
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, "data", "service-status.json")
+        payload = {"bots": [], "note": "состояние пишет multi.py"}
+        try:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+        except Exception as error:
+            payload = {"bots": [], "error": str(error)}
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        self._send(200, body, "application/json; charset=utf-8", head_only=head_only)
 
     def _page(self, head_only):
         """Страница состояния: любая ошибка хранилища — 500 коротким текстом."""

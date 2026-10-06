@@ -18,17 +18,51 @@
 """
 
 import argparse
+import json
 import os
 import sys
 import threading
 import traceback
+from datetime import datetime
 
-from bot import (DEFAULT_DB, ROOT, ScheduleBot, env_value, make_logger, read_token)
+from bot import (DEFAULT_DB, ROOT, ScheduleBot, clean_token, env_value, make_logger,
+                 read_token)
 from snapshot import restore_from_chat
 import tgbot
 
 KGASU_DB = os.path.join(ROOT, "data", "kgasu.db")
 KGASU_TOKEN_FILE = os.path.join(ROOT, "token-kgasu.txt")
+STATUS_FILE = os.path.join(ROOT, "data", "service-status.json")
+
+
+def write_status(entries):
+    """Состояние ботов сервиса — его читает страница /service.json.
+
+    Так видно снаружи, поднялся ли второй бот, даже без доступа к панели Render.
+    Токены в файл не попадают: только id бота и понятная причина ошибки.
+    """
+    payload = {"updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+               "bots": entries}
+    try:
+        os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
+        with open(STATUS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+    return entries
+
+
+def token_info(token):
+    """Проверяет токен: (id бота, имя, текст ошибки).
+
+    Ошибка «Unauthorized» означает, что в переменной лежит старый или неверный
+    токен — именно такая опечатка чаще всего мешает второму боту запуститься.
+    """
+    try:
+        me = tgbot.Telegram(token, timeout=30).get_me()
+        return me.get("id"), me.get("username"), ""
+    except Exception as error:
+        return None, None, str(error)[:160]
 
 
 def restore_if_needed(token, db_path, owner_id, logger):
@@ -68,55 +102,94 @@ def main(argv=None):
         except ValueError:
             refresh = 20
 
-    token_unifirst = env_value("BOT_TOKEN", "").strip() or read_token()
-    token_kgasu = (env_value("BOT_TOKEN_KGASU", "").strip()
+    token_unifirst = clean_token(env_value("BOT_TOKEN", "")) or read_token()
+    token_kgasu = (clean_token(env_value("BOT_TOKEN_KGASU", ""))
                    or read_token(token_file=KGASU_TOKEN_FILE))
 
     if not token_unifirst and not token_kgasu:
         print("Не найдены токены ботов (BOT_TOKEN и BOT_TOKEN_KGASU).")
         return 2
 
+    entries = []      # состояние ботов для страницы /service.json
     bots = []
+
+    def prepare(name, title, token, db_path, university, prefix,
+                webhook_base_value="", port_value=None, refresh_value=None):
+        """Проверяет токен, восстанавливает базу и создаёт бота."""
+        bot_id, username, error = token_info(token)
+        entry = {"name": name, "title": title, "bot_id": bot_id,
+                 "username": username, "state": "запускается", "error": error}
+        if error:
+            auth_problem = any(word in error.lower()
+                               for word in ("unauthorized", "not found", "401", "404"))
+            entry["state"] = ("не запущен: неверный токен" if auth_problem
+                              else "токен не проверен (сеть), пробую запустить")
+            entries.append(entry)
+            write_status(entries)
+            print("[%s] %s: %s" % (name, entry["state"], error))
+            if auth_problem:
+                return None
+        logger = make_logger(prefix=prefix)
+        restore_if_needed(token, db_path, owner_id, logger)
+        bot = ScheduleBot(token, db_path=db_path,
+                          refresh_minutes=refresh_value or refresh, logger=logger,
+                          owner_id=owner_id, webhook_base=webhook_base_value,
+                          port=port_value, university=university)
+        if entry not in entries:
+            entries.append(entry)
+        write_status(entries)
+        return bot, entry
+
     if token_unifirst and "unifirst" in wanted:
-        logger = make_logger(prefix="[ПГУФКСиТ]")
-        restore_if_needed(token_unifirst, DEFAULT_DB, owner_id, logger)
-        bots.append(ScheduleBot(token_unifirst, db_path=DEFAULT_DB,
-                                refresh_minutes=refresh, logger=logger,
-                                owner_id=owner_id, webhook_base=webhook_base,
-                                port=port, university="unifirst"))
+        prepared = prepare("unifirst", "Поволжский ГУФКСиТ", token_unifirst, DEFAULT_DB,
+                           "unifirst", "[ПГУФКСиТ]", webhook_base_value=webhook_base,
+                           port_value=port)
+        if prepared:
+            bots.append(prepared)
     if token_kgasu and "kgasu" in wanted:
-        logger = make_logger(prefix="[КГАСУ]")
-        restore_if_needed(token_kgasu, KGASU_DB, owner_id, logger)
         # Второй бот идёт опросом: порт занят первым ботом.
-        bots.append(ScheduleBot(token_kgasu, db_path=KGASU_DB,
-                                refresh_minutes=max(refresh, 30), logger=logger,
-                                owner_id=owner_id, university="kgasu"))
+        prepared = prepare("kgasu", "КГАСУ", token_kgasu, KGASU_DB, "kgasu", "[КГАСУ]",
+                           refresh_value=max(refresh, 30))
+        if prepared:
+            bots.append(prepared)
 
     if not bots:
-        print("Нечего запускать.")
+        print("Ни один бот не запущен — проверьте токены.")
         return 2
 
     # Первый бот (с вебхуком) — в главном потоке, остальные — в своих.
-    threads = []
-    for bot in bots[1:]:
-        thread = threading.Thread(target=_run_bot, args=(bot,), name="bot-%s" % bot.provider.name,
-                                  daemon=True)
+    for bot, entry in bots[1:]:
+        thread = threading.Thread(target=_run_bot, args=(bot, entry, entries),
+                                  name="bot-%s" % bot.provider.name, daemon=True)
         thread.start()
-        threads.append(thread)
+        _watch(entry, entries, thread)
     try:
-        return _run_bot(bots[0])
+        return _run_bot(bots[0][0], bots[0][1], entries)
     finally:
-        for bot in bots:
+        for bot, _ in bots:
             try:
                 bot.engine.stop()
             except Exception:
                 pass
 
 
-def _run_bot(bot):
+def _watch(entry, entries, thread):
+    """Через несколько секунд отмечает бота как работающего, если он не упал."""
+    def check():
+        thread.join(timeout=15)
+        if thread.is_alive():
+            entry["state"] = "работает"
+            write_status(entries)
+    threading.Thread(target=check, daemon=True).start()
+
+
+def _run_bot(bot, entry=None, entries=None):
     try:
         return bot.run()
     except Exception as error:
+        if entry is not None and entries is not None:
+            entry["state"] = "ошибка: %s" % str(error)[:120]
+            write_status(entries)
         bot.log("Бот %s упал: %s\n%s" % (bot.provider.name, error,
                                         traceback.format_exc(limit=3)))
         return 1
