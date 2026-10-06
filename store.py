@@ -283,16 +283,33 @@ class Store:
                           (limit, offset))
 
     def search_groups(self, query, limit=10):
-        query = (query or "").strip()
+        """Поиск группы без учёта регистра.
+
+        SQLite-функция LIKE не понимает регистр кириллицы («26зк01» не находило
+        «26ЗК01з»), поэтому сравниваем в Python: списки групп небольшие, а ошибка
+        была заметная — студент не мог найти свою группу.
+        """
+        query = (query or "").strip().lower()
         if not query:
             return []
-        return self.query(
-            "SELECT * FROM groups WHERE name LIKE ? ORDER BY"
-            " CASE WHEN name LIKE ? THEN 0 ELSE 1 END, name LIMIT ?",
-            ("%" + query + "%", query + "%", limit))
+        rows = self.query("SELECT * FROM groups ORDER BY name")
+        exact = [row for row in rows if str(row["name"]).lower() == query]
+        starts = [row for row in rows
+                  if str(row["name"]).lower().startswith(query) and row not in exact]
+        contains = [row for row in rows
+                    if query in str(row["name"]).lower()
+                    and row not in exact and row not in starts]
+        return (exact + starts + contains)[:limit]
 
     def group_by_name(self, name):
-        return self.query_one("SELECT * FROM groups WHERE name=?", ((name or "").strip(),))
+        """Группа по точному названию (без учёта регистра)."""
+        wanted = (name or "").strip().lower()
+        if not wanted:
+            return None
+        for row in self.query("SELECT * FROM groups ORDER BY name"):
+            if str(row["name"]).lower() == wanted:
+                return row
+        return None
 
     def group_by_id(self, group_id):
         return self.query_one("SELECT * FROM groups WHERE id=?", (group_id,))
