@@ -53,6 +53,10 @@ class UnifirstProvider:
         groups = self.groups()
         return {"groups": len(groups), "sample": groups[0]["name"] if groups else ""}
 
+    def subgroups_of(self, group):
+        """У ПГУФКСиТ подгруппы выбираются вместе с группой, отдельно их нет."""
+        return []
+
 
 class KgasuProvider:
     """КГАСУ: файлы расписания со страницы /student/raspisanie-zanyatiy/."""
@@ -127,6 +131,48 @@ class KgasuProvider:
             return []
         return [column.get("group") for column in grid.get("columns") or []
                 if column.get("group") and column["group"] != group]
+
+    def subgroups_of(self, group):
+        """Подгруппы группы (если расписание делит её на подгруппы).
+
+        У КГАСУ подгруппы — это отдельные колонки файла («Подгруппа 1», «Подгруппа 2»);
+        у некоторых пар занятие стоит сразу в двух колонках, значит оно общее.
+        """
+        try:
+            grid = self.grid(group)
+        except ProviderError:
+            return []
+        result = []
+        for column in grid.get("columns") or []:
+            if not _same_group(column.get("group"), group):
+                continue
+            name = (column.get("subgroup") or "").strip()
+            if name and name not in result:
+                result.append(name)
+        return result
+
+
+def _same_group(left, right):
+    """Сравнение кодов групп без учёта регистра и пробелов."""
+    normalize = lambda value: "".join(str(value or "").split()).lower()
+    return normalize(left) == normalize(right)
+
+
+def filter_by_subgroup(lessons, subgroup):
+    """Оставляет пары выбранной подгруппы (общие пары остаются).
+
+    Пара считается «общей», если она стоит в нескольких подгруппах — тогда её
+    название выглядит как «Подгруппа 1 / Подгруппа 2».
+    """
+    if not subgroup:
+        return list(lessons or [])
+    wanted = subgroup.strip().lower()
+    result = []
+    for lesson in lessons or []:
+        own = (lesson.get("subgroup") or "").strip().lower()
+        if not own or wanted in own:
+            result.append(lesson)
+    return result
 
     def check(self):
         """Самопроверка источника: список групп и разбор первой группы."""
