@@ -190,6 +190,60 @@ class Telegram:
     def get_file(self, file_id):
         return self.call("getFile", {"file_id": file_id})
 
+    def edit_document(self, chat_id, message_id, file_path, caption=None, filename=None):
+        """Заменяет файл в уже отправленном сообщении (multipart/form-data).
+
+        Нужно для резервных копий базы: вместо нового сообщения каждые полчаса
+        обновляем одно и то же закреплённое — чат не засоряется, уведомлений нет.
+        """
+        filename = filename or os.path.basename(file_path)
+        boundary = "----ScheduleBot%s" % uuid.uuid4().hex
+        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        media = {"type": "document", "media": "attach://backup_file"}
+        if caption:
+            media["caption"] = caption
+            media["parse_mode"] = "HTML"
+        with open(file_path, "rb") as handle:
+            payload = handle.read()
+
+        parts = []
+
+        def field(name, value):
+            parts.append(("--%s\r\n" % boundary).encode("utf-8"))
+            parts.append(('Content-Disposition: form-data; name="%s"\r\n\r\n'
+                          % name).encode("utf-8"))
+            parts.append(str(value).encode("utf-8"))
+            parts.append(b"\r\n")
+
+        field("chat_id", chat_id)
+        field("message_id", message_id)
+        field("media", json.dumps(media, ensure_ascii=False))
+        parts.append(("--%s\r\n" % boundary).encode("utf-8"))
+        parts.append((
+            'Content-Disposition: form-data; name="backup_file"; filename="%s"\r\n'
+            % filename).encode("utf-8"))
+        parts.append(("Content-Type: %s\r\n\r\n" % mime).encode("utf-8"))
+        parts.append(payload)
+        parts.append(b"\r\n")
+        parts.append(("--%s--\r\n" % boundary).encode("utf-8"))
+        body = b"".join(parts)
+
+        request = urllib.request.Request(
+            "%s/editMessageMedia" % self.url_base,
+            data=body,
+            headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as err:
+            raise TgError(err.read().decode("utf-8", "replace"), err.code,
+                          method="editMessageMedia")
+        if not result.get("ok"):
+            raise TgError(result.get("description", "unknown"), result.get("error_code"),
+                          result.get("parameters"), "editMessageMedia")
+        return result.get("result")
+
     def download_file(self, file_id, destination):
         """Скачивает файл из Telegram в локальный путь."""
         info = self.get_file(file_id)
