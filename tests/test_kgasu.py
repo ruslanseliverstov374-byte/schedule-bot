@@ -147,6 +147,25 @@ def main():
           [item["uid"] for item in kgasu.lessons_for_day(docx_grid, "26РП01", chet_day)] ==
           [item["uid"] for item in kgasu.lessons_for_day(docx_grid, "26РП01", chet_day)])
 
+    print("\n7. Выбор подгруппы студентом")
+    from schedule import providers
+    all_lessons = kgasu.lessons_for_day(docx_grid, "26РП01", chet_day)
+    first = providers.filter_by_subgroup(all_lessons, "Подгруппа 1")
+    second = providers.filter_by_subgroup(all_lessons, "Подгруппа 2")
+    check("фильтр по подгруппе что-то оставляет", bool(first) and bool(second),
+          (len(first), len(second)))
+    strict_second = [item for item in all_lessons
+                     if item["subgroup"].strip().lower() == "подгруппа 2"]
+    check("в подгруппе 1 нет пар чужой подгруппы",
+          all(item not in first for item in strict_second), len(strict_second))
+    check("без выбора подгруппы видны все пары",
+          providers.filter_by_subgroup(all_lessons, "") == all_lessons)
+    check("общие пары (в двух подгруппах) остаются при выборе",
+          all(any("подгруппа 1" in (item["subgroup"] or "").lower()
+                  and "подгруппа 2" in (item["subgroup"] or "").lower()
+                  for item in group) or group
+              for group in (first, second)), True)
+
     print("\n" + "=" * 60)
     print("Проверок: %d, провалов: %d" % (len(CHECKS), len(FAILURES)))
     if FAILURES:

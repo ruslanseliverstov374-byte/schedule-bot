@@ -32,9 +32,22 @@ import urllib.request
 API = "https://api.github.com"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SKIP_DIRS = {".git", "__pycache__", "data", "logs", ".venv", "venv", ".idea", ".vscode"}
-SKIP_FILES = {"token.txt", ".env", "_autostart.ps1"}
-SKIP_SUFFIXES = (".pyc", ".db", ".db-wal", ".db-shm", ".zip", ".log")
+SKIP_DIRS = {".git", "__pycache__", "data", "logs", ".venv", "venv", ".idea", ".vscode",
+             ".cache"}
+SKIP_FILES = {"token.txt", "token-kgasu.txt", ".env", "_autostart.ps1"}
+SKIP_SUFFIXES = (".pyc", ".db", ".db-wal", ".db-shm", ".zip", ".log", ".gz", ".token")
+
+
+def is_secret(name):
+    """Файлы, которые НИКОГДА не должны уезжать в репозиторий.
+
+    Отдельная проверка появилась после случая, когда файл с токеном второго бота
+    (token-kgasu.txt) не попал в список исключений и оказался в публичном
+    репозитории — теперь любые «token*», «*secret*», «*.key» и «*.pem» отсекаются.
+    """
+    lowered = name.lower()
+    return (lowered in SKIP_FILES or "token" in lowered or "secret" in lowered
+            or lowered.endswith((".key", ".pem", ".env")))
 
 
 class GitHubError(Exception):
@@ -62,6 +75,41 @@ def api(method, url, token, payload=None):
         raise GitHubError("нет связи с GitHub: %s" % error)
 
 
+def push_tree(repo_url, token, files, message, branch="main", log=print):
+    """Заливает все файлы одним коммитом через Git Data API.
+
+    Так надёжнее и быстрее, чем по одному файлу через Contents API: GitHub
+    иногда отвечает 409/500 на «правила репозитория» при файловой заливке,
+    а один коммит (blobs -> tree -> commit -> ref) проходит целиком.
+    """
+    import base64
+
+    ref = api("GET", "%s/git/ref/heads/%s" % (repo_url, branch), token)
+    base_commit = ref["object"]["sha"]
+    commit = api("GET", "%s/git/commits/%s" % (repo_url, base_commit), token)
+    base_tree = commit["tree"]["sha"]
+    log("Базовый коммит: %s" % base_commit[:10])
+
+    tree = []
+    for index, (path, blob) in enumerate(files, start=1):
+        payload = {"content": base64.b64encode(blob).decode("ascii"),
+                   "encoding": "base64"}
+        result = api("POST", "%s/git/blobs" % repo_url, token, payload)
+        tree.append({"path": path, "mode": "100644", "type": "blob",
+                     "sha": result["sha"]})
+        if index % 20 == 0 or index == len(files):
+            log("  подготовлено файлов: %d/%d" % (index, len(files)))
+
+    new_tree = api("POST", "%s/git/trees" % repo_url, token,
+                   {"base_tree": base_tree, "tree": tree})
+    new_commit = api("POST", "%s/git/commits" % repo_url, token,
+                     {"message": message, "tree": new_tree["sha"],
+                      "parents": [base_commit]})
+    api("PATCH", "%s/git/refs/heads/%s" % (repo_url, branch), token,
+        {"sha": new_commit["sha"]})
+    return new_commit["sha"]
+
+
 def collect_files(root=ROOT):
     """Список (относительный путь, байты) — без секретов, баз и служебного мусора."""
     files = []
@@ -69,7 +117,7 @@ def collect_files(root=ROOT):
         # Служебные папки пропускаем, но .github (workflow с пингом) нужен.
         directories[:] = [name for name in directories if name not in SKIP_DIRS]
         for name in sorted(names):
-            if name in SKIP_FILES or name.endswith(SKIP_SUFFIXES):
+            if name in SKIP_FILES or name.endswith(SKIP_SUFFIXES) or is_secret(name):
                 continue
             full = os.path.join(current, name)
             relative = os.path.relpath(full, root).replace("\\", "/")
@@ -158,32 +206,22 @@ def main():
         print("❌ Не удалось открыть репозиторий: %s" % error)
         return 1
 
-    print("\nЗаливаю в ветку %s..." % arguments.branch)
-    created = updated = 0
-    for index, (path, content) in enumerate(files, 1):
-        try:
-            result = put_file(repo_url, token, path, content,
-                              arguments.message, arguments.branch)
-        except GitHubError as error:
-            hint = ""
-            if error.code in (403, 404):
-                hint = ("\n   Похоже, у токена нет права Contents: Read and write "
-                        "на этот репозиторий (или он не добавлен в доступ токена).\n"
-                        "   GitHub → Settings → Developer settings → Personal access tokens "
-                        "→ выбрать токен → Repository access и Contents: Read and write.")
-            print("❌ %s: %s%s" % (path, error, hint))
-            return 1
-        if result == "создан":
-            created += 1
-        else:
-            updated += 1
-        if index % 10 == 0 or index == len(files):
-            print("   %d/%d (создано %d, обновлено %d)"
-                  % (index, len(files), created, updated))
-        if arguments.delay:
-            time.sleep(arguments.delay)
-
-    print("\n✅ Готово: https://github.com/%s/tree/%s" % (arguments.repo, arguments.branch))
+    print("\nЗаливаю в ветку %s одним коммитом..." % arguments.branch)
+    try:
+        commit_sha = push_tree(repo_url, token, files, arguments.message,
+                               arguments.branch, log=print)
+    except GitHubError as error:
+        hint = ""
+        if error.code in (403, 404):
+            hint = ("\n   Похоже, у токена нет права Contents: Read and write "
+                    "на этот репозиторий (или он не добавлен в доступ токена).\n"
+                    "   GitHub → Settings → Developer settings → Personal access tokens "
+                    "→ выбрать токен → Repository access и Contents: Read and write.")
+        print("❌ Заливка не удалась: %s%s" % (error, hint))
+        return 1
+    print("\n✅ Готово (%d файлов, коммит %s): https://github.com/%s/tree/%s"
+          % (len(files), commit_sha[:10], arguments.repo, arguments.branch))
+    return 0
     return 0
 
 
