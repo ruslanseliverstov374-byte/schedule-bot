@@ -206,15 +206,18 @@ class ReminderEngine:
         before_minutes = int(user.get("before_minutes") or 0)
         if before_minutes > 0:
             lessons = self.safe_lessons(group_title, today) or []
-            for lesson in lessons:
-                start = parse_time(lesson.get("start"))
+            # Идём по слотам: если пара делится на подгруппы, напоминание одно,
+            # со списком вариантов, а не два одинаковых подряд.
+            for block in unifirst.group_by_slot(lessons):
+                start = parse_time(block.get("start"))
                 if not start:
                     continue
                 remind_at = start - timedelta(minutes=before_minutes)
                 if remind_at <= local < start:
-                    key = "before:%s" % lesson.get("uid", lesson.get("subject", ""))
+                    key = "before:%s:%s:%s" % (today.isoformat(), block.get("para"),
+                                               block.get("start") or "")
                     if not self.already_sent(user["tg_id"], "before", key):
-                        message = texts.before_lesson_reminder(before_minutes, lesson)
+                        message = texts.before_lesson_reminder(before_minutes, block)
                         if self.send(user["tg_id"], message):
                             self.remember_sent(user["tg_id"], "before", key)
 
