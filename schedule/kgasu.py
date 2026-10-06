@@ -53,6 +53,10 @@ TYPE_WORDS = ("лекция", "лекции", "практические", "пр�
               "семинар", "семинары", "консультация", "экзамен", "зачет", "зачёт",
               "курсовая работа", "контрольная работа")
 
+#: Слова, с которых начинается место проведения (пишутся без кавычек).
+PLACE_WORDS = ("НОЦ", "КИТАП", "СК", "спортзал", "бассейн", "стадион", "актовый зал",
+               "корпус", "аудитория", "мастерская")
+
 
 class KgasuError(Exception):
     """Ошибка получения расписания КГАСУ."""
@@ -194,7 +198,90 @@ def grid_from_bytes(blob, file_name=""):
         return {"header": table[header_index - 1] if header_index else [],
                 "columns": columns, "rows": rows, "kind": "docx"}
     text = docparse.doc_text(blob)
-    return {"header": [], "columns": [], "rows": [], "text": text, "kind": "doc"}
+    rows, row_width = _doc_rows(text)
+    columns = _doc_columns(text, row_width)
+    if not rows:
+        raise KgasuError("в файле %s не удалось собрать строки расписания" % file_name)
+    return {"header": [], "columns": columns, "rows": rows, "kind": "doc",
+            "text": text, "row_width": row_width}
+
+
+def _doc_rows(text):
+    """Собирает строки расписания из текста .doc.
+
+    В старом .doc нет готовой сетки: ячейки идут подряд, ряды разделяются знаком
+    конца строки, который тоже выглядит как разделитель ячеек. Зато строку можно
+    найти по метке недели: у каждой строки есть «Чет» или «Неч», а перед ней
+    стоят дата и номер пары, после — время и ячейки занятий. Ширина строки
+    вычисляется по расстоянию между временами пар.
+    """
+    cells = [cell.strip() for cell in text.split("\t")]
+    time_positions = [index for index, cell in enumerate(cells) if TIME_RE.search(cell)]
+    if not time_positions:
+        return [], 0
+    strides = [later - earlier for earlier, later in
+               zip(time_positions, time_positions[1:]) if later - earlier > 3]
+    row_width = min(strides) if strides else 6
+    rows = []
+    current_day = ""
+    for index, cell in enumerate(cells):
+        if cell.lower() not in ("чет", "неч"):
+            continue
+        start = index - 2
+        if start < 0:
+            continue
+        chunk = cells[start:start + row_width]
+        if len(chunk) < 4:
+            continue
+        if chunk[0] in WEEKDAYS:
+            current_day = chunk[0]
+        rows.append({
+            "day": current_day,
+            "para": chunk[1],
+            "parity": cell,
+            "time": chunk[3],
+            "cells": chunk[4:],
+        })
+    return rows, row_width
+
+
+def _doc_columns(text, row_width):
+    """Столбцы занятий из шапки .doc: после «Время» идут коды групп и подгруппы."""
+    cells = [cell.strip() for cell in text.split("\t")]
+    try:
+        time_index = next(index for index, cell in enumerate(cells[:60])
+                          if cell.lower() == "время")
+    except StopIteration:
+        return []
+    if row_width <= 4:
+        return []
+    tail = cells[time_index + 1:time_index + 1 + (row_width - 4) * 3]
+    columns = []
+    current_group = ""
+    for position, value in enumerate(tail):
+        if not value:
+            continue
+        if re.match(r"^\d{2}[А-Яа-яA-Za-z]{2,4}\d{0,2}[а-я]?$", value) or \
+                re.match(r"^[А-Яа-яA-Za-z]{2,6}[- ]?\d{2,3}[а-я]?$", value):
+            current_group = value
+            columns.append({"group": value, "subgroup": "", "index": 4 + len(columns)})
+        elif "подгруппа" in value.lower():
+            number = re.sub(r"\D+", "", value) or "1"
+            if columns:
+                columns[-1]["subgroup"] = "Подгруппа %s" % number
+            else:
+                columns.append({"group": current_group, "subgroup": "Подгруппа %s" % number,
+                                "index": 4})
+    # Если подгруппы в шапке не указаны — оставляем по одному столбцу на группу
+    unique = []
+    seen = set()
+    for column in columns:
+        key = (column["group"], column["subgroup"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(column)
+    return unique
 
 
 def _pick_schedule_table(tables):
@@ -406,7 +493,18 @@ def parse_cell(text):
         result["place"] = (result["place"] + " " +
                            result["subject"][quoted.start():].strip()).strip()
         result["subject"] = result["subject"][:quoted.start()].strip(" .,;:—-")
+    else:
+        # Известные места пишутся без кавычек: «НОЦ Наследие», «КИТАП 2», «СК Тезуче»
+        for keyword in PLACE_WORDS:
+            found = re.search(r"\s+%s\b" % keyword, result["subject"], re.I)
+            if found and len(result["subject"]) - found.start() > 4:
+                result["place"] = (result["subject"][found.start():].strip() + " " +
+                                   result["place"]).strip()
+                result["subject"] = result["subject"][:found.start()].strip(" .,;:—-")
+                break
     result["subject"] = re.sub(r"[,;]?\s*$", "", result["subject"]).strip()
+    result["place"] = re.sub(r"\(\s*\)", " ", result["place"])
+    result["place"] = re.sub(r"\s+", " ", result["place"]).strip(" .,;:—-")
     if not result["rooms"] and result["place"]:
         result["rooms"] = [result["place"]]
     result["teachers"] = result["teachers"][:3]
@@ -418,7 +516,7 @@ def parse_cell(text):
 
 def lessons_for_day(grid, group, day, subgroup=""):
     """Пары группы на конкретную дату (с учётом «Чет/Неч» и пометок «с даты»)."""
-    if grid.get("kind") != "docx":
+    if grid.get("kind") not in ("docx", "doc"):
         raise KgasuError("разбор этого файла пока не поддержан (%s)"
                          % grid.get("kind"))
     weekday = WEEKDAYS[day.weekday()]
