@@ -433,6 +433,47 @@ def main():
     finally:
         shared.stop()
 
+    print("\n10. Медленный бот не задерживает второго (свои очереди у маршрутов)")
+    import threading as threading_module
+    import time as time_module
+
+    slow_started = threading_module.Event()
+    slow_release = threading_module.Event()
+    slow_seen, fast_seen = Collector(), Collector()
+
+    def slow_handler(update):
+        slow_started.set()
+        slow_release.wait(timeout=5)
+        slow_seen(update)
+
+    shared_queues = StatusApp(FakeStore(), on_update=None, webhook_secret="",
+                              bot_username=BOT_USERNAME, engine=None,
+                              logger=lambda message: None)
+    shared_queues.add_endpoint("/telegram", SECRET, slow_handler)
+    shared_queues.add_endpoint("/telegram-fast", "fast-secret", fast_seen)
+    apps.append(shared_queues)
+    queues_port = shared_queues.start(port=0, host="127.0.0.1")
+    try:
+        code = post_update(queues_port, {"update_id": 11, "message": {"text": "медленно"}},
+                           secret=SECRET)
+        check("медленное обновление принято", code == 200, code)
+        check("медленный обработчик начал работу", slow_started.wait(timeout=2))
+        started = time_module.time()
+        code = post_update(queues_port, {"update_id": 12, "message": {"text": "быстро"}},
+                           secret="fast-secret", path="/telegram-fast")
+        check("второй маршрут принят сразу", code == 200, code)
+        check("второй бот не ждёт первого", wait_for(lambda: len(fast_seen) == 1, timeout=2),
+              len(fast_seen))
+        check("второй маршрут ответил быстрее секунды", time_module.time() - started < 1.0,
+              round(time_module.time() - started, 2))
+        check("медленное обновление ещё не обработано", len(slow_seen) == 0, len(slow_seen))
+        slow_release.set()
+        check("медленное обновление всё-таки обработано",
+              wait_for(lambda: len(slow_seen) == 1, timeout=3), len(slow_seen))
+    finally:
+        slow_release.set()
+        shared_queues.stop()
+
     print("\n" + "=" * 60)
     print("Проверок: %d, провалов: %d" % (len(CHECKS), len(FAILURES)))
     if FAILURES:

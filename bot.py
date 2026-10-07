@@ -46,7 +46,17 @@ MENU_LABELS = set()
 for _row in texts.MAIN_BUTTONS:
     for _label in _row:
         MENU_LABELS.add(_label)
-MENU_LABELS.update({texts.BTN_MENU, texts.BTN_CANCEL, "🏠 Главное меню"})
+MENU_LABELS.update({texts.BTN_MENU, texts.BTN_CANCEL, "🏠 Главное меню",
+                    texts.BTN_ADMIN})
+
+#: Русские названия админских команд: можно писать и «/статистика», и «статистика».
+ADMIN_WORDS = {
+    "админ": "/admin", "/админ": "/admin", "админка": "/admin", "панель": "/admin",
+    "статистика": "/stats", "/статистика": "/stats", "данные": "/stats",
+    "пользователи": "/users", "/пользователи": "/users", "студенты": "/users",
+    "рассылка": "/broadcast", "/рассылка": "/broadcast", "объявление": "/broadcast",
+    "история": "/broadcasts", "/история": "/broadcasts",
+}
 
 
 # ------------------------------------------------------------------ служебное
@@ -159,6 +169,7 @@ class ScheduleBot:
         self.lock = InstanceLock(os.path.join(ROOT, "data",
                                               "bot-%s.lock" % self.provider.name))
         self.owner_id = int(owner_id) if str(owner_id or "").isdigit() else None
+        self._current_user = None      # чей апдейт обрабатывается сейчас
         self.webhook_base = (webhook_base or "").rstrip("/")
         self.webhook_path = webhook_path or "/telegram"
         # Свой ли это HTTP-сервер: у второго бота в общем сервисе он общий,
@@ -369,6 +380,7 @@ class ScheduleBot:
             return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        self._current_user = user
         self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         if not text:
             # Служебные сообщения (закрепление копии базы, смена названия чата и т.п.)
@@ -385,6 +397,8 @@ class ScheduleBot:
 
         command = text.split()[0].lower().split("@")[0] if text.startswith("/") else ""
         if command:
+            # Русские названия команд: «/статистика» работает как «/stats».
+            command = ADMIN_WORDS.get(command, command)
             self.handle_command(chat_id, user, command, text)
             return
 
@@ -394,6 +408,11 @@ class ScheduleBot:
             if user.get("state"):
                 self.store.set_state(user["tg_id"], "")
             self.handle_button(chat_id, user, text)
+            return
+
+        # Админ может писать команду и без слэша: «статистика», «рассылка».
+        if user.get("is_admin") and text.lower() in ADMIN_WORDS:
+            self.handle_command(chat_id, user, ADMIN_WORDS[text.lower()], text)
             return
 
         state = user.get("state") or ""
@@ -455,7 +474,9 @@ class ScheduleBot:
         handler(chat_id, user, raw)
 
     def handle_button(self, chat_id, user, label):
-        if label == texts.BTN_TODAY:
+        if label == texts.BTN_ADMIN:
+            self.cmd_admin(chat_id, user, "")
+        elif label == texts.BTN_TODAY:
             self.send_day(chat_id, user, self.local_today(user))
         elif label == texts.BTN_TOMORROW:
             self.send_day(chat_id, user, self.local_today(user) + timedelta(days=1))
@@ -484,9 +505,14 @@ class ScheduleBot:
 
     # ------------------------------------------------------------- клавиатуры
 
-    def main_keyboard(self):
-        return tgbot.reply_keyboard([[{"text": label} for label in row]
-                                     for row in texts.MAIN_BUTTONS])
+    def main_keyboard(self, user=None):
+        # Пользователь запоминается при обработке апдейта: так кнопка админ-панели
+        # появляется во всех ответах, не переписывая два десятка вызовов.
+        user = user or self._current_user or {}
+        rows = [[{"text": label} for label in row] for row in texts.MAIN_BUTTONS]
+        if user.get("is_admin"):
+            rows.append([{"text": texts.BTN_ADMIN}])
+        return tgbot.reply_keyboard(rows)
 
     def local_today(self, user):
         offset = int(user.get("tz_offset") or 3)
@@ -658,15 +684,17 @@ class ScheduleBot:
         self.tg.send_message(chat_id, texts.whoami(user), reply_markup=self.main_keyboard())
 
     def cmd_admin(self, chat_id, user, raw):
+        """Админ-панель.
+
+        Важно: панель не ходит в интернет. Раньше она «на живую» проверяла
+        источник расписания, а у КГАСУ это скачивание девяти страниц сайта —
+        команда зависала на минуты и (в общем сервисе) блокировала второго бота.
+        Живая проверка осталась отдельной кнопкой «🔄 Обновить группы».
+        """
         if not user.get("is_admin"):
             self.tg.send_message(chat_id, "Команда только для админа бота.")
             return
         stats = self.store.stats()
-        online = True
-        try:
-            self.provider.check()
-        except Exception:
-            online = False
         buttons = [
             [tgbot.btn("🔄 Обновить группы", "adm:groups"),
              tgbot.btn("♻️ Обновить расписание", "adm:cache")],
@@ -682,7 +710,7 @@ class ScheduleBot:
         ]
         self.tg.send_message(
             chat_id,
-            texts.admin_screen(stats, self.store.groups_updated_at(), online,
+            texts.admin_screen(stats, self.store.groups_updated_at(), self.source_ok(),
                                self.backup_status()),
             reply_markup=tgbot.inline(buttons))
 
@@ -932,6 +960,21 @@ class ScheduleBot:
             except Exception:
                 pass
         self.tg.send_message(chat_id, text, reply_markup=reply_markup)
+
+    def source_ok(self):
+        """Считаем источник доступным, если список групп обновлялся недавно.
+
+        Живую проверку в интернете делает только кнопка «Обновить группы»:
+        для админ-панели достаточно сохранённой отметки времени.
+        """
+        stamp = self.store.groups_updated_at() or ""
+        if not stamp:
+            return False
+        try:
+            updated = datetime.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+        return (datetime.now() - updated).total_seconds() < 24 * 3600 * 2
 
     def backup_status(self):
         """Строка состояния резервных копий для админ-экрана."""
@@ -1311,6 +1354,7 @@ class ScheduleBot:
             return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        self._current_user = user
         self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         self.tg.answer_callback(callback["id"])
         if data == "noop":

@@ -251,7 +251,8 @@ class StatusApp:
         self._server = None
         self._server_thread = None
         self._worker_thread = None
-        self._queue = queue.Queue()
+        self._workers = []
+        self._queues = {}
         self._stop_event = threading.Event()
 
     def add_endpoint(self, path, secret="", handler=None):
@@ -275,23 +276,36 @@ class StatusApp:
                 return self.port
             number = resolve_port(port)
             server = _WebServer((host, number), _StatusHandler, app=self)
-            work_queue = queue.Queue()
             stop_event = threading.Event()
-            worker = threading.Thread(target=self._worker_loop,
-                                      args=(work_queue, stop_event),
-                                      name="webapp-worker", daemon=True)
+            # У каждого маршрута своя очередь и свой рабочий поток: медленный
+            # ответ одного бота (например сайт вуза тормозит) не задерживает
+            # обновления второго бота в том же сервисе.
+            queues = {}
+            workers = []
+            for path in (self.endpoints or {"/telegram": None}):
+                path_queue = queue.Queue()
+                worker = threading.Thread(target=self._worker_loop,
+                                          args=(path_queue, stop_event),
+                                          name="webapp-worker%s"
+                                               % ("" if path == "/telegram"
+                                                  else path.replace("/", "-")),
+                                          daemon=True)
+                queues[path] = path_queue
+                workers.append(worker)
             thread = threading.Thread(target=server.serve_forever,
                                       name="webapp-http", daemon=True)
             self._server = server
             self._server_thread = thread
-            self._worker_thread = worker
-            self._queue = work_queue
+            self._worker_thread = workers[0] if workers else None
+            self._workers = workers
+            self._queues = queues
             self._stop_event = stop_event
             self._started_at = datetime.now(timezone.utc)
-            worker.start()
+            for worker in workers:
+                worker.start()
             thread.start()
-            self.log("Веб-сервер запущен: http://%s:%d (страница /, health /health)"
-                     % (host, self.port))
+            self.log("Веб-сервер запущен: http://%s:%d (страница /, health /health,"
+                     " маршрутов %d)" % (host, self.port, len(queues)))
             return self.port
 
     def stop(self):
@@ -303,10 +317,11 @@ class StatusApp:
         with self._lock:
             server, self._server = self._server, None
             thread, self._server_thread = self._server_thread, None
+            workers, self._workers = getattr(self, "_workers", []), []
             worker, self._worker_thread = self._worker_thread, None
             stop_event, self._stop_event = self._stop_event, threading.Event()
-            self._queue = queue.Queue()
-        if server is None and worker is None:
+            self._queues = {}
+        if server is None and not workers and worker is None:
             return
         if stop_event is not None:
             stop_event.set()
@@ -320,8 +335,9 @@ class StatusApp:
                 server.server_close()
             except Exception as error:
                 self.log("Закрытие сокета веб-сервера: %s" % error)
-        if worker is not None and worker.is_alive():
-            worker.join(WORKER_TIMEOUT)
+        for running in list(workers) + ([worker] if worker is not None else []):
+            if running is not None and running.is_alive():
+                running.join(WORKER_TIMEOUT)
         self.log("Веб-сервер остановлен")
 
     # --------------------------------------------------------------- свойства
@@ -353,15 +369,21 @@ class StatusApp:
 
     # ---------------------------------------------------------- очередь updates
 
-    def _accept(self, update, handler=None):
-        """Кладёт update в очередь: ответ Telegram уходит, не дожидаясь обработки.
+    def _accept(self, update, handler=None, path="/telegram"):
+        """Кладёт update в очередь своего маршрута: ответ Telegram уходит сразу.
 
         Вместе с обновлением запоминается обработчик того маршрута, по которому
-        оно пришло: у каждого бота в общем сервисе он свой.
+        оно пришло: у каждого бота в общем сервисе он свой, и очереди тоже свои.
         """
         self._bump("updates_received")
-        self._queue.put((update, handler))
-        size = self._queue.qsize()
+        target_queue = self._queues.get(path)
+        if target_queue is None:
+            # Сервер ещё не поднят или маршрут неизвестен — общая очередь.
+            if not self._queues:
+                self._queues[path] = queue.Queue()
+            target_queue = self._queues.setdefault(path, next(iter(self._queues.values())))
+        target_queue.put((update, handler))
+        size = target_queue.qsize()
         if size >= BACKLOG_WARNING and size % BACKLOG_WARNING == 0:
             self.log("Очередь обновлений выросла: %d (обработчик не успевает)" % size)
 
@@ -668,7 +690,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
             return
         # update_id может отсутствовать — это не ошибка: просто считаем и кладём.
         handler = endpoint.get("handler")
-        app._accept(update, handler=handler)
+        app._accept(update, handler=handler, path=path)
         self._plain(200, "ok")
 
 

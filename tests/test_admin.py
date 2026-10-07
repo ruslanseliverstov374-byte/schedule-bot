@@ -103,6 +103,9 @@ class FakeProvider:
     title = "Тестовый вуз"
     city = "Казань"
 
+    def __init__(self):
+        self.checks = 0        # сколько раз просили «живую» проверку источника
+
     def groups(self):
         return [{"name": "26281", "hasSubgroups": False, "subgroups": []},
                 {"name": "26282", "hasSubgroups": False, "subgroups": []}]
@@ -111,6 +114,7 @@ class FakeProvider:
         return [], {}
 
     def check(self):
+        self.checks += 1
         return {"groups": 2}
 
     def subgroups_of(self, group):
@@ -312,6 +316,48 @@ def main():
                                    for item in tg.out(student)))
         check("давно не заходившему не ушло",
               not any("Только для активных" in item["text"] for item in tg.out(inactive)))
+
+        print("\n7. Быстрый доступ к панели и русские команды")
+        provider = bot.provider
+        provider.checks = 0
+        tg.clear()
+        send_text(bot, admin, "/admin")
+        check("админ-панель не ходит в интернет за проверкой источника",
+              provider.checks == 0, provider.checks)
+        inline = [button.get("callback_data")
+                  for row in (tg.messages[-1]["keyboard"] or {}).get("inline_keyboard", [])
+                  for button in row]
+        check("панель пришла с кнопками", "adm:users" in inline, inline)
+        tg.clear()
+        send_text(bot, admin, "🏠 Меню")
+        labels = [button.get("text")
+                  for row in (tg.messages[-1]["keyboard"] or {}).get("keyboard", [])
+                  for button in row]
+        check("у админа в меню есть кнопка «Админ»", "👑 Админ" in labels, labels)
+        tg.clear()
+        send_text(bot, admin, "👑 Админ")
+        check("кнопка «Админ» открывает панель", "Админ-панель" in tg.last_text(admin),
+              tg.last_text(admin)[:60])
+        tg.clear()
+        send_text(bot, admin, "/админ")
+        check("русская команда «/админ» работает", "Админ-панель" in tg.last_text(admin),
+              tg.last_text(admin)[:60])
+        tg.clear()
+        send_text(bot, admin, "статистика")
+        check("слово «статистика» без слэша открывает данные",
+              "Данные по боту" in tg.last_text(admin), tg.last_text(admin)[:80])
+        tg.clear()
+        send_text(bot, student, "/админ")
+        check("у обычного студента панели нет",
+              "админа" in tg.last_text(student).lower(), tg.last_text(student)[:80])
+        check("кнопка «Админ» появляется в любом меню админа",
+              "👑 Админ" in [button.get("text")
+                             for row in bot.main_keyboard(store.get_user(admin))
+                             .get("keyboard", []) for button in row], None)
+        check("у студента кнопки «Админ» нет",
+              "👑 Админ" not in [button.get("text")
+                                 for row in bot.main_keyboard(store.get_user(student))
+                                 .get("keyboard", []) for button in row], None)
 
     finally:
         try:
