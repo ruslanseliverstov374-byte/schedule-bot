@@ -230,13 +230,21 @@ class StatusApp:
     """
 
     def __init__(self, store, on_update=None, webhook_secret="", bot_username="",
-                 engine=None, logger=print):
+                 engine=None, logger=print, extra_endpoints=None):
         self.store = store
         self.on_update = on_update
         self.webhook_secret = str(webhook_secret or "")
         self.bot_username = str(bot_username or "")
         self.engine = engine
         self.log = logger if callable(logger) else (lambda message: None)
+        # Маршруты вебхуков: путь -> {"secret": ..., "handler": ...}. Основной —
+        # /telegram, дополнительные добавляются, когда в сервисе два бота.
+        self.default_endpoint = {"path": "/telegram", "secret": self.webhook_secret,
+                                 "handler": on_update}
+        self.endpoints = {"/telegram": self.default_endpoint}
+        for endpoint in extra_endpoints or []:
+            self.add_endpoint(endpoint.get("path"), endpoint.get("secret"),
+                              endpoint.get("handler"))
         self._lock = threading.RLock()
         self._counters = {"updates_received": 0, "updates_handled": 0, "errors": 0}
         self._started_at = None
@@ -245,6 +253,15 @@ class StatusApp:
         self._worker_thread = None
         self._queue = queue.Queue()
         self._stop_event = threading.Event()
+
+    def add_endpoint(self, path, secret="", handler=None):
+        """Добавляет ещё один маршрут вебхука (второй бот в том же сервисе)."""
+        path = "/" + str(path or "").strip("/")
+        if not path or path == "/":
+            return None
+        endpoint = {"path": path, "secret": str(secret or ""), "handler": handler}
+        self.endpoints[path] = endpoint
+        return endpoint
 
     # ------------------------------------------------------------- управление
 
@@ -336,10 +353,14 @@ class StatusApp:
 
     # ---------------------------------------------------------- очередь updates
 
-    def _accept(self, update):
-        """Кладёт update в очередь: ответ Telegram уходит, не дожидаясь обработки."""
+    def _accept(self, update, handler=None):
+        """Кладёт update в очередь: ответ Telegram уходит, не дожидаясь обработки.
+
+        Вместе с обновлением запоминается обработчик того маршрута, по которому
+        оно пришло: у каждого бота в общем сервисе он свой.
+        """
         self._bump("updates_received")
-        self._queue.put(update)
+        self._queue.put((update, handler))
         size = self._queue.qsize()
         if size >= BACKLOG_WARNING and size % BACKLOG_WARNING == 0:
             self.log("Очередь обновлений выросла: %d (обработчик не успевает)" % size)
@@ -350,18 +371,20 @@ class StatusApp:
             if stop_event.is_set() and work_queue.empty():
                 return           # останавливаемся, но сначала дочищаем очередь
             try:
-                update = work_queue.get(timeout=0.2)
+                item = work_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            if update is None:
+            if item is None:
                 return
-            self._handle_update(update)
+            update, handler = item if isinstance(item, tuple) else (item, None)
+            self._handle_update(update, handler)
 
-    def _handle_update(self, update):
-        """Вызывает on_update и ведёт счётчики. Исключения наружу не выходят."""
+    def _handle_update(self, update, handler=None):
+        """Вызывает обработчик и ведёт счётчики. Исключения наружу не выходят."""
+        target = handler if handler is not None else self.on_update
         try:
-            if self.on_update is not None:
-                self.on_update(update)
+            if target is not None:
+                target(update)
         except Exception as error:
             self._bump("errors")
             self.log("Ошибка обработки обновления: %s" % error)
@@ -599,19 +622,26 @@ class _StatusHandler(BaseHTTPRequestHandler):
                     extra={"Allow": "GET, HEAD, POST"})
 
     def _post(self):
-        """POST: единственный маршрут — приём вебхука /telegram."""
-        if urlsplit(self.path).path != "/telegram":
-            self._not_found()
-            return
+        """POST: приём вебхука Telegram.
+
+        Маршрутов может быть несколько — когда в одном сервисе живут два бота
+        (например ПГУФКСиТ и КГАСУ), у каждого свой путь и свой секрет.
+        """
+        path = urlsplit(self.path).path
         app = self._app()
         if app is None:
             self._plain(503, "приложение не подключено", close=True)
             return
-        if app.webhook_secret:
+        # Маршрут должен быть объявлен: неизвестные пути не принимаем вовсе.
+        endpoint = app.endpoints.get(path)
+        if endpoint is None:
+            self._not_found()
+            return
+        if endpoint.get("secret"):
             provided = self.headers.get(SECRET_HEADER) or ""
-            if provided != app.webhook_secret:
+            if provided != endpoint["secret"]:
                 app._bump("errors")
-                app.log("Вебхук отклонён: неверный секрет")
+                app.log("Вебхук отклонён: неверный секрет (%s)" % path)
                 self._plain(403, "forbidden", close=True)
                 return
         try:
@@ -637,7 +667,8 @@ class _StatusHandler(BaseHTTPRequestHandler):
             self._plain(400, "ожидался объект update", close=True)
             return
         # update_id может отсутствовать — это не ошибка: просто считаем и кладём.
-        app._accept(update)
+        handler = endpoint.get("handler")
+        app._accept(update, handler=handler)
         self._plain(200, "ok")
 
 

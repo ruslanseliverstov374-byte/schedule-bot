@@ -137,7 +137,7 @@ def http_error_code(error):
 class ScheduleBot:
     def __init__(self, token, db_path=DEFAULT_DB, refresh_minutes=20, logger=print,
                  api=None, telegram=None, owner_id=None, webhook_base="", port=None,
-                 provider=None, university=""):
+                 provider=None, university="", webhook_path="/telegram"):
         self.log = logger
         self.token = token
         self.store = Store(db_path)
@@ -160,6 +160,10 @@ class ScheduleBot:
                                               "bot-%s.lock" % self.provider.name))
         self.owner_id = int(owner_id) if str(owner_id or "").isdigit() else None
         self.webhook_base = (webhook_base or "").rstrip("/")
+        self.webhook_path = webhook_path or "/telegram"
+        # Свой ли это HTTP-сервер: у второго бота в общем сервисе он общий,
+        # поэтому останавливать его при выходе нельзя.
+        self.owns_status_app = True
         self.port = port
         self.status_app = None
         self.snapshot = None
@@ -181,9 +185,9 @@ class ScheduleBot:
             {"command": "settings", "description": "Настройки и напоминания"},
             {"command": "help", "description": "Помощь"},
         ])
-        if self.webhook_base:
+        if self.webhook_base and not self.webhook_mode:
             self.start_webhook_mode()
-        else:
+        elif not self.webhook_base:
             try:
                 self.tg.delete_webhook(drop_pending_updates=False)
             except Exception as error:
@@ -214,18 +218,39 @@ class ScheduleBot:
 
     def start_webhook_mode(self):
         """Render (и любой хостинг с HTTPS): принимаем обновления вебхуком."""
-        secret = env_value("WEBHOOK_SECRET") or hashlib.sha256(
-            ("schedule-bot:" + self.token).encode("utf-8")).hexdigest()[:40]
-        url = self.webhook_base + "/telegram"
+        secret = self.webhook_secret()
+        url = self.webhook_base + self.webhook_path
         self.tg.set_webhook(url, secret_token=secret)
         self.webhook_mode = True
         self.status_app = StatusApp(
-            self.store, on_update=self.handle_update, webhook_secret=secret,
+            self.store, on_update=None, webhook_secret="",
             bot_username=(self.me or {}).get("username", ""),
             engine=self.engine, logger=self.log)
+        self.status_app.add_endpoint(self.webhook_path, secret, self.handle_update)
         actual_port = self.status_app.start(self.port)
         self.log("Режим вебхука: %s (страница состояния на порту %d)" % (url, actual_port))
         return self.status_app
+
+    def webhook_secret(self):
+        """Секрет вебхука: свой у каждого бота (зависит от токена)."""
+        return env_value("WEBHOOK_SECRET") or hashlib.sha256(
+            ("schedule-bot:" + self.token).encode("utf-8")).hexdigest()[:40]
+
+    def attach_webhook(self, app, path="", secret=""):
+        """Подключает бота к общему HTTP-серверу — так в одном сервисе живут двое.
+
+        Второй бот получает собственный путь и секрет, а сервер (и порт) остаётся
+        один: Telegram будит сервис при каждом сообщении любому из ботов.
+        """
+        path = "/" + str(path or self.webhook_path).strip("/")
+        secret = secret or self.webhook_secret()
+        self.tg.set_webhook(self.webhook_base + path, secret_token=secret)
+        self.webhook_mode = True
+        self.owns_status_app = False
+        self.status_app = app
+        app.add_endpoint(path, secret, self.handle_update)
+        self.log("Вебхук подключён: %s (общий сервер)" % (self.webhook_base + path))
+        return app
 
     def start_snapshot(self):
         """Копии базы в чат владельца — на бесплатном хостинге диск стирается."""
@@ -257,6 +282,11 @@ class ScheduleBot:
             groups = self.provider.groups()
         except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("Не удалось обновить список групп: %s" % error)
+            return self.store.groups_count()
+        except Exception as error:
+            # Список групп — не повод падать: сайт вуза может тормозить,
+            # а в базе уже лежит предыдущий список.
+            self.log("Неожиданная ошибка при обновлении списка групп: %s" % error)
             return self.store.groups_count()
         if groups:
             self.store.save_groups(groups)
@@ -308,7 +338,7 @@ class ScheduleBot:
             self.engine.stop()
             if self.snapshot:
                 self.snapshot.stop()
-            if self.status_app:
+            if self.status_app and self.owns_status_app:
                 self.status_app.stop()
             self.lock.release()
 

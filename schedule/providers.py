@@ -75,7 +75,16 @@ class KgasuProvider:
     # ------------------------------------------------------------- группы
 
     def groups(self):
-        raw = kgasu.groups()
+        """Список групп вуза.
+
+        Любая сетевая неудача (сайт КГАСУ иногда отвечает очень медленно)
+        превращается в ProviderError, который бот умеет переживать: он остаётся
+        работать на сохранённом списке групп, а не падает целиком.
+        """
+        try:
+            raw = kgasu.groups()
+        except kgasu.KgasuError as error:
+            raise ProviderError(str(error))
         self._groups = raw
         return [{"name": item["name"], "file_url": item["file_url"],
                  "file_ext": item["file_ext"], "hasSubgroups": False, "subgroups": []}
@@ -88,7 +97,10 @@ class KgasuProvider:
             if row and row.get("source_url"):
                 return row["source_url"]
         if self._groups is None:
-            self._groups = kgasu.groups()
+            try:
+                self._groups = kgasu.groups()
+            except kgasu.KgasuError as error:
+                raise ProviderError(str(error))
         found = kgasu.find_group(self._groups, group)
         if not found:
             raise ProviderError("группа %s не найдена на сайте КГАСУ" % group)
@@ -99,12 +111,14 @@ class KgasuProvider:
     def grid(self, group, force=False):
         """Разобранная таблица расписания группы (с кэшем в памяти и на диске)."""
         file_url = self._file_url(group)
-        key = (file_url, bool(force))
         if not force and file_url in self._grids:
             return self._grids[file_url]
-        blob, path = kgasu.download(file_url,
-                                    max_age_minutes=0 if force else self.cache_minutes)
-        grid = kgasu.prepare(blob, file_url.split("/")[-1])
+        try:
+            blob, path = kgasu.download(file_url,
+                                        max_age_minutes=0 if force else self.cache_minutes)
+            grid = kgasu.prepare(blob, file_url.split("/")[-1])
+        except kgasu.KgasuError as error:
+            raise ProviderError(str(error))
         grid["file_hash"] = hashlib.sha1(blob).hexdigest()[:16]
         grid["file_url"] = file_url
         if not force:

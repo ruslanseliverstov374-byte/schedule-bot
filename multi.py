@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime
 
@@ -147,8 +148,10 @@ def main(argv=None):
         if prepared:
             bots.append(prepared)
     if token_kgasu and "kgasu" in wanted:
-        # Второй бот идёт опросом: порт занят первым ботом.
+        # Второй бот получает вебхук, если первый его не занял: тогда Telegram
+        # будит сервис при любом сообщении. Иначе он работал бы опросом.
         prepared = prepare("kgasu", "КГАСУ", token_kgasu, KGASU_DB, "kgasu", "[КГАСУ]",
+                           webhook_base_value=webhook_base if not bots else "",
                            refresh_value=max(refresh, 30))
         if prepared:
             bots.append(prepared)
@@ -157,8 +160,26 @@ def main(argv=None):
         print("Ни один бот не запущен — проверьте токены.")
         return 2
 
+    # В облаке оба бота принимают сообщения через один HTTP-сервер: у каждого
+    # свой путь и секрет, а порт остаётся один. Так бесплатный сервис, который
+    # засыпает, просыпается от сообщения любому из ботов.
+    if webhook_base and len(bots) > 1:
+        from webapp import StatusApp
+
+        first_bot, first_entry = bots[0]
+        app = StatusApp(first_bot.store, on_update=None, webhook_secret="",
+                        bot_username=first_entry.get("username", ""),
+                        engine=first_bot.engine, logger=first_bot.log)
+        first_bot.attach_webhook(app, first_bot.webhook_path)
+        for bot, _ in bots[1:]:
+            bot.webhook_base = webhook_base
+            bot.attach_webhook(app, "/telegram-%s" % bot.provider.name)
+        actual_port = app.start(port)
+        first_bot.log("Общий HTTP-сервер на порту %s, маршруты: %s"
+                      % (actual_port, ", ".join(sorted(app.endpoints))))
+        port = None      # сервер уже поднят — второй раз не поднимаем
+
     # Все боты запускаются в отдельных потоках, главный поток держит процесс живым.
-    # Первый бот (с вебхуком) занимает порт, остальные работают опросом Telegram.
     threads = []
     for bot, entry in bots:
         thread = threading.Thread(target=_run_bot, args=(bot, entry, entries),
@@ -188,16 +209,27 @@ def _watch(entry, entries, thread):
     threading.Thread(target=check, daemon=True).start()
 
 
-def _run_bot(bot, entry=None, entries=None):
-    try:
-        return bot.run()
-    except Exception as error:
-        if entry is not None and entries is not None:
-            entry["state"] = "ошибка: %s" % str(error)[:120]
-            write_status(entries)
-        bot.log("Бот %s упал: %s\n%s" % (bot.provider.name, error,
-                                        traceback.format_exc(limit=3)))
-        return 1
+def _run_bot(bot, entry=None, entries=None, retry_seconds=60, max_retry_seconds=600):
+    """Запускает бота и перезапускает его при сбое.
+
+    Раньше одна сетевая ошибка (например сайт вуза не ответил за таймаут)
+    убивала поток бота до следующего перезапуска сервиса — снаружи это выглядело
+    как «бот не работает весь день». Теперь бот поднимается заново с паузой.
+    """
+    delay = retry_seconds
+    while True:
+        try:
+            return bot.run()
+        except Exception as error:
+            message = str(error)[:160]
+            if entry is not None and entries is not None:
+                entry["state"] = "перезапуск после ошибки: %s" % message
+                write_status(entries)
+            bot.log("Бот %s упал: %s\n%s" % (bot.provider.name, error,
+                                            traceback.format_exc(limit=3)))
+            bot.log("Повторный запуск бота %s через %d с" % (bot.provider.name, delay))
+            time.sleep(delay)
+            delay = min(delay * 2, max_retry_seconds)
 
 
 if __name__ == "__main__":

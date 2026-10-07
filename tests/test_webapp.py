@@ -156,6 +156,13 @@ class Collector:
         with self._lock:
             self._items.append(update)
 
+    def __len__(self):
+        return len(self.snapshot())
+
+    @property
+    def items(self):
+        return self.snapshot()
+
     def snapshot(self):
         with self._lock:
             return list(self._items)
@@ -189,10 +196,10 @@ def json_headers(secret=SECRET):
     return headers
 
 
-def post_update(port, update, secret=SECRET):
+def post_update(port, update, secret=SECRET, path="/telegram"):
     """Отправляет update вебхуком и возвращает код ответа."""
     body = update if isinstance(update, str) else json.dumps(update, ensure_ascii=False)
-    status, _, _ = call(port, "POST", "/telegram", body=body, headers=json_headers(secret))
+    status, _, _ = call(port, "POST", path, body=body, headers=json_headers(secret))
     return status
 
 
@@ -387,6 +394,44 @@ def main():
                 instance.stop()
             except Exception:
                 pass
+
+    print("\n9. Два бота в одном сервисе: два вебхука на одном порту")
+    first_seen = Collector()
+    second_seen = Collector()
+    shared = StatusApp(FakeStore(), on_update=None, webhook_secret="",
+                       bot_username=BOT_USERNAME, engine=None,
+                       logger=lambda message: None)
+    shared.add_endpoint("/telegram", SECRET, first_seen)
+    shared.add_endpoint("/telegram-kgasu", "kgasu-secret-456", second_seen)
+    apps.append(shared)
+    shared_port = shared.start(port=0, host="127.0.0.1")
+    try:
+        code = post_update(shared_port, {"update_id": 1, "message": {"text": "первому"}},
+                           secret=SECRET)
+        check("обновление первому боту принято", code == 200, code)
+        code = post_update(shared_port, {"update_id": 2, "message": {"text": "второму"}},
+                           secret="kgasu-secret-456", path="/telegram-kgasu")
+        check("обновление второму боту принято", code == 200, code)
+        check("каждое обновление попало своему боту",
+              wait_for(lambda: len(first_seen) == 1 and len(second_seen) == 1),
+              (first_seen.items, second_seen.items))
+        check("первый бот получил только своё",
+              first_seen.items and first_seen.items[0]["message"]["text"] == "первому",
+              first_seen.items)
+        check("второй бот получил только своё",
+              second_seen.items and second_seen.items[0]["message"]["text"] == "второму",
+              second_seen.items)
+        code = post_update(shared_port, {"update_id": 3, "message": {"text": "чужой"}},
+                           secret=SECRET, path="/telegram-kgasu")
+        check("чужой секрет на втором маршруте отклонён", code == 403, code)
+        code = post_update(shared_port, {"update_id": 4, "message": {"text": "мимо"}},
+                           secret="kgasu-secret-456", path="/telegram-hacker")
+        check("неизвестный маршрут — 404", code == 404, code)
+        check("оба бота видны в маршрутах",
+              set(shared.endpoints) == {"/telegram", "/telegram-kgasu"},
+              sorted(shared.endpoints))
+    finally:
+        shared.stop()
 
     print("\n" + "=" * 60)
     print("Проверок: %d, провалов: %d" % (len(CHECKS), len(FAILURES)))
