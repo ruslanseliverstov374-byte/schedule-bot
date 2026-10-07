@@ -175,6 +175,9 @@ class ScheduleBot:
     def setup(self):
         self.me = self.tg.get_me()
         self.log("Бот @%s запущен (id %s)" % (self.me.get("username"), self.me.get("id")))
+        # Раньше служебные сообщения о закреплении копии базы заводили запись
+        # о самом боте в списке пользователей — чистим её.
+        self.store.delete_user(self.me.get("id"))
         self.tg.set_my_commands([
             {"command": "start", "description": "Выбрать группу и начать"},
             {"command": "today", "description": "Расписание на сегодня"},
@@ -350,12 +353,23 @@ class ScheduleBot:
         elif "callback_query" in update:
             self.handle_callback(update["callback_query"])
 
+    def is_self(self, sender):
+        """Проверяет, что апдейт пришёл не от самого бота."""
+        bot_id = (self.me or {}).get("id")
+        return bool(bot_id) and (sender or {}).get("id") == bot_id
+
     def handle_message(self, message):
         chat_id = message["chat"]["id"]
         text = (message.get("text") or "").strip()
         sender = message.get("from") or {}
+        if self.is_self(sender):
+            # Сообщение от самого бота (например служебное о закреплении копии
+            # базы): своего же чата в списке пользователей быть не должно.
+            self.log("Сообщение от самого бота — пропускаю")
+            return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         if not text:
             # Служебные сообщения (закрепление копии базы, смена названия чата и т.п.)
             # приходят без текста — отвечать на них нельзя, иначе бот «разговаривает»
@@ -389,8 +403,18 @@ class ScheduleBot:
         if state == "hw_due":
             self.finish_homework_due(chat_id, user, text)
             return
-        if state == "broadcast":
-            self.finish_broadcast(chat_id, user, text)
+        if state == "broadcast" or state == "broadcast_text":
+            # Админ присылает текст рассылки — показываем предпросмотр с подтверждением.
+            data = self.store.state_of(user) or {}
+            target = data.get("target") or "all"
+            title = data.get("title") or "всем"
+            self.ask_broadcast_text(chat_id, user, target, title, preview_text=text)
+            return
+        if state == "broadcast_confirm":
+            # Передумал и прислал новый текст — обновляем предпросмотр.
+            data = self.store.state_of(user) or {}
+            self.ask_broadcast_text(chat_id, user, data.get("target") or "all",
+                                    data.get("title") or "всем", preview_text=text)
             return
         if state == "evening_time":
             self.finish_evening_time(chat_id, user, text)
@@ -416,6 +440,12 @@ class ScheduleBot:
             "/help": self.cmd_help,
             "/whoami": self.cmd_whoami,
             "/admin": self.cmd_admin,
+            "/users": self.cmd_users,
+            "/stats": self.cmd_stats_data,
+            "/broadcast": self.cmd_broadcast,
+            "/broadcasts": self.cmd_broadcasts,
+            "/grant": self.cmd_grant,
+            "/revoke": self.cmd_revoke,
         }
         handler = mapping.get(command)
         if not handler:
@@ -643,8 +673,11 @@ class ScheduleBot:
             [tgbot.btn("💾 Сохранить копию базы", "adm:backup"),
              tgbot.btn("🗄 Включить копии" if not self.snapshot else "🗄 Копии включены",
                        "adm:enable_backup" if not self.snapshot else "adm:stats")],
-            [tgbot.btn("📊 Статистика", "adm:stats"),
-             tgbot.btn("📣 Рассылка", "adm:broadcast")],
+            [tgbot.btn("👥 Пользователи", "adm:users"),
+             tgbot.btn("📊 Данные", "adm:stats")],
+            [tgbot.btn("📥 Выгрузить CSV", "adm:csv"),
+             tgbot.btn("🕓 История рассылок", "adm:history")],
+            [tgbot.btn("📣 Рассылка", "adm:broadcast")],
             [tgbot.btn("🏠 Меню", "menu")],
         ]
         self.tg.send_message(
@@ -652,6 +685,253 @@ class ScheduleBot:
             texts.admin_screen(stats, self.store.groups_updated_at(), online,
                                self.backup_status()),
             reply_markup=tgbot.inline(buttons))
+
+    # ------------------------------------------------ данные и рассылки (админ)
+
+    def require_admin(self, chat_id, user):
+        if not user.get("is_admin"):
+            self.tg.send_message(chat_id, "Команда только для админа бота.")
+            return False
+        return True
+
+    def command_argument(self, raw):
+        """Аргумент команды: у «/users csv» это «csv», у «/users» — пусто.
+
+        В обработчик команды приходит всё сообщение целиком, поэтому саму команду
+        нужно отбросить — иначе, например, «/broadcast» уходил бы как текст рассылки.
+        """
+        text = (raw or "").strip()
+        if text.startswith("/"):
+            parts = text.split(None, 1)
+            text = parts[1] if len(parts) > 1 else ""
+        return text.strip()
+
+    def send_users_page(self, chat_id, user, page=0, query="", edit_message_id=None):
+        """Список пользователей бота: кто, группа, когда заходил, сколько писал."""
+        if not self.require_admin(chat_id, user):
+            return
+        import report
+
+        limit = 10
+        total = report.count_users(self.store, query)
+        pages = max(1, (total + limit - 1) // limit)
+        page = max(0, min(page, pages - 1))
+        rows = report.users_rows(self.store, limit=limit, offset=page * limit, query=query)
+        text = texts.users_page(rows, page, pages, total,
+                                getattr(self.provider, "title", ""), query)
+        buttons = []
+        navigation = []
+        if page > 0:
+            navigation.append(tgbot.btn("⬅️", "adm:users:%d" % (page - 1)))
+        if page < pages - 1:
+            navigation.append(tgbot.btn("➡️", "adm:users:%d" % (page + 1)))
+        if navigation:
+            buttons.append(navigation)
+        buttons.append([tgbot.btn("📥 Выгрузить CSV", "adm:csv"),
+                        tgbot.btn("📣 Рассылка", "adm:broadcast")])
+        buttons.append([tgbot.btn("👑 Админ-панель", "adm:menu")])
+        self._send_or_edit(chat_id, text, tgbot.inline(buttons), edit_message_id)
+
+    def cmd_users(self, chat_id, user, raw):
+        if not self.require_admin(chat_id, user):
+            return
+        argument = self.command_argument(raw)
+        if argument.lower() in ("csv", "выгрузка", "файл"):
+            self.send_users_csv(chat_id, user)
+            return
+        self.send_users_page(chat_id, user, 0, query=argument)
+
+    def cmd_grant(self, chat_id, user, raw):
+        """Выдаёт права админа: /grant <telegram_id>. Помощник должен сначала написать боту."""
+        if not self.require_admin(chat_id, user):
+            return
+        target = self._parse_admin_target(chat_id, raw)
+        if not target:
+            return
+        row = self.store.get_user(target)
+        if not row:
+            self.tg.send_message(
+                chat_id,
+                "Этот человек ещё не писал боту. Пусть нажмёт /start и пришлёт свой ID "
+                "(он виден по команде /whoami) — потом повтори /grant.")
+            return
+        self.store.update_user(target, is_admin=1)
+        name = row.get("first_name") or row.get("username") or target
+        self.log("Выданы права админа: %s" % target)
+        self.tg.send_message(chat_id, "👑 Теперь <b>%s</b> — админ этого бота "
+                                      "(доступны /admin, /stats, /users, /broadcast)."
+                             % texts.esc(str(name)),
+                             reply_markup=self.main_keyboard())
+
+    def cmd_revoke(self, chat_id, user, raw):
+        """Снимает права админа: /revoke <telegram_id>."""
+        if not self.require_admin(chat_id, user):
+            return
+        target = self._parse_admin_target(chat_id, raw)
+        if not target:
+            return
+        if target == user["tg_id"]:
+            self.tg.send_message(chat_id, "Себе права снять нельзя — иначе некому будет "
+                                          "управлять ботом.")
+            return
+        admins = [row for row in self.store.all_users() if row.get("is_admin")]
+        if len(admins) <= 1:
+            self.tg.send_message(chat_id, "Это последний админ — снимать права некому.")
+            return
+        self.store.update_user(target, is_admin=0)
+        self.log("Сняты права админа: %s" % target)
+        self.tg.send_message(chat_id, "✅ Права админа у <code>%s</code> сняты." % target,
+                             reply_markup=self.main_keyboard())
+
+    def _parse_admin_target(self, chat_id, raw):
+        """Достаёт Telegram ID из аргумента команды и объясняет, если его нет."""
+        value = self.command_argument(raw).split()[0] if self.command_argument(raw) else ""
+        if value.startswith("@"):
+            row = self.store.query_one("SELECT * FROM users WHERE username=?",
+                                       (value[1:],))
+            return row["tg_id"] if row else None
+        return int(value) if value.lstrip("-").isdigit() else None
+
+    def cmd_stats_data(self, chat_id, user, raw):
+        if not self.require_admin(chat_id, user):
+            return
+        import report
+
+        summary = report.summary(self.store)
+        self.tg.send_message(chat_id,
+                             texts.admin_stats_page(summary,
+                                                    getattr(self.provider, "title", "")),
+                             reply_markup=tgbot.inline([
+                                 [tgbot.btn("👥 Пользователи", "adm:users"),
+                                  tgbot.btn("📥 CSV", "adm:csv")],
+                                 [tgbot.btn("👑 Админ-панель", "adm:menu")]]))
+
+    def send_users_csv(self, chat_id, user, include_other=False):
+        """Отдаёт таблицу пользователей файлом CSV (открывается в Excel)."""
+        if not self.require_admin(chat_id, user):
+            return
+        import report
+
+        rows = report.users_rows(self.store, order="created")
+        bot_title = getattr(self.provider, "title", "")
+        body = report.users_csv(rows, bot_title=bot_title, include_bot=True)
+        path = os.path.join(ROOT, "data", "users-%s-%s.csv"
+                            % (getattr(self.provider, "name", "bot"),
+                               datetime.now().strftime("%Y%m%d-%H%M")))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # BOM уже внутри строки CSV, поэтому пишем как обычный utf-8.
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+        caption = ("📥 Пользователи бота «%s»: %d человек.\n"
+                   "Файл открывается в Excel (разделитель «;»)." % (bot_title, len(rows)))
+        self.tg.send_document(chat_id, path, caption=caption,
+                              filename=os.path.basename(path))
+
+    def start_broadcast(self, chat_id, user, edit_message_id=None):
+        """Шаг 1 рассылки: выбираем, кому отправлять."""
+        if not self.require_admin(chat_id, user):
+            return
+        counts = {"all": len(self.store.all_users()),
+                  "active": len(self.store.active_users(7))}
+        groups = {}
+        for row in self.store.query(
+                "SELECT group_title, COUNT(*) AS n FROM users WHERE group_title<>''"
+                " GROUP BY group_title ORDER BY n DESC LIMIT 6"):
+            groups[row["group_title"]] = row["n"]
+        buttons = [[tgbot.btn("👥 Всем (%d)" % counts["all"], "bc:all")],
+                   [tgbot.btn("🔥 Активным за 7 дней (%d)" % counts["active"], "bc:active")]]
+        for title, count in groups.items():
+            buttons.append([tgbot.btn("🎓 %s (%d)" % (title, count), "bc:group:%s" % title)])
+        buttons.append([tgbot.btn("✖️ Отмена", "bc:cancel")])
+        text = texts.broadcast_targets(counts, groups)
+        self._send_or_edit(chat_id, text, tgbot.inline(buttons), edit_message_id)
+
+    def cmd_broadcast(self, chat_id, user, raw):
+        """Рассылка: /broadcast — выбор получателей, затем текст сообщения."""
+        if not self.require_admin(chat_id, user):
+            return
+        text = self.command_argument(raw)
+        if text:
+            self.ask_broadcast_text(chat_id, user, "all", "всем", preview_text=text)
+            return
+        self.start_broadcast(chat_id, user)
+
+    def cmd_broadcasts(self, chat_id, user, raw):
+        """История рассылок: кто, когда, что и с каким результатом."""
+        if not self.require_admin(chat_id, user):
+            return
+        rows = self.store.recent_broadcasts(10)
+        self.tg.send_message(chat_id,
+                             texts.broadcasts_history(rows,
+                                                      getattr(self.provider, "title", "")),
+                             reply_markup=tgbot.inline(
+                                 [[tgbot.btn("📣 Новая рассылка", "adm:broadcast")],
+                                  [tgbot.btn("👑 Админ-панель", "adm:menu")]]))
+
+    def ask_broadcast_text(self, chat_id, user, target, target_title, preview_text=""):
+        """Шаг 2: ждём текст сообщения (или сразу показываем предпросмотр)."""
+        if preview_text:
+            count = self.broadcast_recipients(target)
+            self.store.set_state(user["tg_id"], "broadcast_confirm",
+                                 {"target": target, "title": target_title,
+                                  "text": preview_text})
+            self.tg.send_message(chat_id,
+                                 texts.broadcast_preview(texts.esc(preview_text), len(count),
+                                                         target_title),
+                                 reply_markup=tgbot.inline([
+                                     [tgbot.btn("✅ Отправить", "bc:send"),
+                                      tgbot.btn("✖️ Отмена", "bc:cancel")]]))
+            return
+        self.store.set_state(user["tg_id"], "broadcast_text",
+                             {"target": target, "title": target_title})
+        self.tg.send_message(
+            chat_id,
+            "✍️ Пришли текст сообщения для рассылки (%s).\n"
+            "Можно с HTML-разметкой: <b>жирный</b>, <i>курсив</i>, ссылки.\n\n"
+            "Отмена — кнопка ниже." % texts.esc(target_title),
+            reply_markup=tgbot.inline([[tgbot.btn("✖️ Отмена", "bc:cancel")]]))
+
+    def broadcast_recipients(self, target):
+        """Кого коснётся рассылка: 'all', 'active' или 'group:<название>'."""
+        if target == "active":
+            return [row for row in self.store.active_users(7) if not row.get("is_admin")]
+        if target and target.startswith("group:"):
+            return [row for row in self.store.users_of_group(target[6:])
+                    if not row.get("is_admin")]
+        return [row for row in self.store.all_users() if not row.get("is_admin")]
+
+    def finish_broadcast(self, chat_id, user, text, target="all", target_title="всем"):
+        """Отправляет рассылку: с паузой между сообщениями и отчётом админу."""
+        self.store.set_state(user["tg_id"], "")
+        if not user.get("is_admin"):
+            return
+        recipients = self.broadcast_recipients(target)
+        delivered = failed = 0
+        for index, target_user in enumerate(recipients, start=1):
+            try:
+                self.tg.send_message(target_user["tg_id"],
+                                     "📣 <b>Объявление от админа</b>\n\n" + text)
+                delivered += 1
+            except Exception as error:
+                failed += 1
+                self.log("Рассылка: не доставлено %s (%s)" % (target_user["tg_id"], error))
+            if index % 20 == 0:
+                time.sleep(1)      # не упираемся в лимиты Telegram
+        self.store.add_broadcast(user["tg_id"], target, target_title, text,
+                                 delivered, failed)
+        self.tg.send_message(chat_id, texts.admin_broadcast_done(delivered, failed,
+                                                                 target_title),
+                             reply_markup=self.main_keyboard())
+
+    def _send_or_edit(self, chat_id, text, reply_markup=None, message_id=None):
+        """Отправляет новое сообщение или правит существующее (для страниц)."""
+        if message_id:
+            try:
+                self.tg.edit_message(chat_id, message_id, text, reply_markup=reply_markup)
+                return
+            except Exception:
+                pass
+        self.tg.send_message(chat_id, text, reply_markup=reply_markup)
 
     def backup_status(self):
         """Строка состояния резервных копий для админ-экрана."""
@@ -987,21 +1267,36 @@ class ScheduleBot:
 
     # ------------------------------------------------------------- напоминания
 
-    def finish_broadcast(self, chat_id, user, text):
-        self.store.set_state(user["tg_id"], "")
+    def route_broadcast_callback(self, chat_id, user, action, message_id=None):
+        """Кнопки рассылки: выбор получателей, подтверждение, отмена."""
         if not user.get("is_admin"):
+            self.tg.send_message(chat_id, "Только для админа.")
             return
-        delivered = failed = 0
-        for target in self.store.all_users():
-            if target["tg_id"] == chat_id:
-                continue
-            try:
-                self.tg.send_message(target["tg_id"], "📣 <b>Сообщение от админа</b>\n\n" + text)
-                delivered += 1
-            except Exception:
-                failed += 1
-        self.tg.send_message(chat_id, texts.admin_broadcast_done(delivered, failed),
-                             reply_markup=self.main_keyboard())
+        if action == "cancel":
+            self.store.set_state(user["tg_id"], "")
+            self.tg.send_message(chat_id, "✖️ Рассылка отменена.",
+                                 reply_markup=self.main_keyboard())
+            return
+        if action == "send":
+            data = self.store.state_of(user) or {}
+            text = data.get("text") or ""
+            if not text:
+                self.tg.send_message(chat_id, "Текст потерялся — начни заново: /broadcast")
+                return
+            self.finish_broadcast(chat_id, user, text, data.get("target") or "all",
+                                  data.get("title") or "всем")
+            return
+        if action == "all":
+            self.ask_broadcast_text(chat_id, user, "all", "всем")
+            return
+        if action == "active":
+            self.ask_broadcast_text(chat_id, user, "active", "активным за 7 дней")
+            return
+        if action.startswith("group:"):
+            title = action[6:]
+            self.ask_broadcast_text(chat_id, user, action, "группа %s" % title)
+            return
+        self.log("Неизвестный колбэк рассылки: %s" % action)
 
     # -------------------------------------------------------------- колбэки
 
@@ -1011,8 +1306,12 @@ class ScheduleBot:
         chat_id = (message.get("chat") or {}).get("id")
         message_id = message.get("message_id")
         sender = callback.get("from") or {}
+        if self.is_self(sender):
+            self.log("Колбэк от самого бота — пропускаю")
+            return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         self.tg.answer_callback(callback["id"])
         if data == "noop":
             return
@@ -1063,7 +1362,10 @@ class ScheduleBot:
         elif head == "hwp":
             self.route_homework_from_day(chat_id, user, parts)
         elif head == "adm":
-            self.route_admin_callback(chat_id, user, parts[1] if len(parts) > 1 else "")
+            self.route_admin_callback(chat_id, user, ":".join(parts[1:]))
+        elif head == "bc":
+            # Данные могут содержать «:», например «bc:group:26281».
+            self.route_broadcast_callback(chat_id, user, ":".join(parts[1:]), message_id)
         else:
             self.log("Неизвестный колбэк: %s" % data)
 
@@ -1303,14 +1605,20 @@ class ScheduleBot:
             self.tg.send_message(chat_id, "♻️ Обновлено недель: <b>%d</b>, ошибок: %d"
                                  % (updated, errors), reply_markup=self.main_keyboard())
         elif action == "stats":
-            stats = self.store.stats()
-            self.tg.send_message(chat_id, texts.admin_screen(stats,
-                                                             self.store.groups_updated_at()),
-                                 reply_markup=self.main_keyboard())
+            self.cmd_stats_data(chat_id, user, "")
+        elif action == "menu":
+            self.cmd_admin(chat_id, user, "")
+        elif action in ("users",) or action.startswith("users:"):
+            page = 0
+            if ":" in action:
+                page = int(action.split(":", 1)[1] or 0)
+            self.send_users_page(chat_id, user, page)
+        elif action == "csv":
+            self.send_users_csv(chat_id, user)
+        elif action == "history":
+            self.cmd_broadcasts(chat_id, user, "")
         elif action == "broadcast":
-            self.store.set_state(user["tg_id"], "broadcast")
-            self.tg.send_message(chat_id, "📣 Напиши текст рассылки всем пользователям "
-                                          "(или «отмена»).")
+            self.start_broadcast(chat_id, user)
         elif action == "backup":
             if not self.snapshot and not self.enable_snapshots(chat_id):
                 self.tg.send_message(chat_id, "😔 Не удалось включить копии — смотрите лог.",

@@ -76,20 +76,39 @@ keepalive.yml       Render проверяет          закреплённая 
    сообщением в чат владельца и поднимает из него всё после перезапуска контейнера
    (у бесплатного Render диск стирается при каждом деплое).
 6. **Сервис не засыпает**: раз в 5 минут GitHub обращается к `/health`.
+7. **Пульт владельца** (доступен тебе в обоих ботах, потому что твой Telegram ID — админ):
+   * `/admin` — панель: обновить группы и кэш, копия базы, пользователи, данные, рассылка;
+   * `/stats` — данные по боту: всего пользователей, кто заходил сегодня и за 7 дней,
+     новые, сколько сообщений, общая домашка и личные заметки, топ групп,
+     и **сводка по второму боту** в том же сервисе;
+   * `/users` — список: имя, @username, группа и подгруппа, когда заходил, сколько
+     сообщений и личных заметок; `/users csv` — тот же список файлом CSV для Excel;
+   * `/broadcast` — рассылка от имени бота: выбрать получателей (всем, активным за
+     7 дней или конкретной группе), прислать текст, увидеть предпросмотр с числом
+     получателей и подтвердить; после отправки приходит отчёт «доставлено/ошибок»;
+   * `/broadcasts` — история рассылок (кто, когда, что и с каким результатом);
+   * `/grant <id>`, `/revoke <id>` — выдать или снять права админа помощнику
+     (он должен сначала написать боту `/start`).
 
 ## Полезные команды (из папки проекта)
 
 ```bash
 python bot.py --check                    # связь с API расписания, база, разбор дат и ДЗ
-python tests/simulate.py                 # 50 проверок сценариев бота (офлайн)
+python tests/simulate.py                 # 65 проверок сценариев бота (офлайн)
 python tests/test_mock_api.py            # 46 проверок мока API
-python tests/test_webapp.py              # 46 проверок health-страницы и вебхука
+python tests/test_webapp.py              # 54 проверки health-страницы и вебхуков
 python tests/test_snapshot.py            # 54 проверки копий базы
-check.bat                                # всё сразу
+python tests/test_docxparse.py           # 53 проверки парсера .docx (КГАСУ)
+python tests/test_docparse.py            # 53 проверки парсера старого .doc
+python tests/test_kgasu.py               # 45 проверок источника КГАСУ
+python tests/test_report.py              # сводки и выгрузки по пользователям
+python tests/test_admin.py               # админ-функции: рассылка и данные
+check.bat                                # всё сразу (10 наборов)
 python tools/preview.py 26282            # как выглядят экраны бота на живых данных
+python tools/kgasu_preview.py 26ЗК01     # расписание группы КГАСУ на живых данных
+python tools/watch_kgasu_cloud.py        # ждёт, пока бот КГАСУ поднимется в облаке
 python tools/cloud_check.py --owner-id 1368878379            # проверить копии базы
 python tools/cloud_check.py --owner-id 1368878379 --disaster-test   # аварийное восстановление
-python tools/check_keepalive.py --repo ruslanseliverstov374-byte/schedule-bot --token-file <файл>
 python tools/push_to_github.py --repo ruslanseliverstov374-byte/schedule-bot --token-file <файл>
 ```
 

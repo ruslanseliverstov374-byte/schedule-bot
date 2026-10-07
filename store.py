@@ -145,6 +145,15 @@ class Store:
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
         if "university" not in user_columns:
             connection.execute("ALTER TABLE users ADD COLUMN university TEXT DEFAULT ''")
+        # Сколько сообщений прислал пользователь — для админской статистики.
+        if "messages_count" not in user_columns:
+            connection.execute("ALTER TABLE users ADD COLUMN messages_count INTEGER DEFAULT 0")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS broadcasts ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " created_at TEXT DEFAULT '', author_id INTEGER, target TEXT DEFAULT '',"
+            " target_title TEXT DEFAULT '', text TEXT DEFAULT '',"
+            " delivered INTEGER DEFAULT 0, failed INTEGER DEFAULT 0)")
 
     def execute(self, sql, params=()):
         with self._lock, self.connect() as connection:
@@ -222,6 +231,39 @@ class Store:
 
     def all_users(self):
         return self.query("SELECT * FROM users ORDER BY created_at")
+
+    def touch_user(self, tg_id):
+        """Отмечает активность: время последнего визита и число сообщений."""
+        self.execute(
+            "UPDATE users SET last_seen=?, messages_count=COALESCE(messages_count, 0)+1"
+            " WHERE tg_id=?", (now_iso(), tg_id))
+
+    def delete_user(self, tg_id):
+        """Удаляет запись пользователя (например, если это запись самого бота)."""
+        self.execute("DELETE FROM users WHERE tg_id=?", (tg_id,))
+
+    def users_of_group(self, group_title):
+        """Пользователи одной группы (для адресной рассылки)."""
+        return self.query(
+            "SELECT * FROM users WHERE group_title=? ORDER BY last_seen DESC",
+            (group_title,))
+
+    def active_users(self, days=7):
+        """Кто заходил за последние N суток."""
+        border = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        return self.query(
+            "SELECT * FROM users WHERE last_seen>=? ORDER BY last_seen DESC", (border,))
+
+    def add_broadcast(self, author_id, target, target_title, text, delivered, failed):
+        """Записывает факт рассылки — чтобы была история, кто и что отправлял."""
+        self.execute(
+            "INSERT INTO broadcasts(created_at, author_id, target, target_title, text,"
+            " delivered, failed) VALUES(?,?,?,?,?,?,?)",
+            (now_iso(), author_id, target, target_title, text, delivered, failed))
+
+    def recent_broadcasts(self, limit=10):
+        return self.query(
+            "SELECT * FROM broadcasts ORDER BY id DESC LIMIT ?", (limit,))
 
     def count_users(self):
         return (self.query_one("SELECT COUNT(*) AS n FROM users") or {}).get("n", 0)

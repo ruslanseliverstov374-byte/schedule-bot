@@ -561,8 +561,13 @@ def help_text(user=None, is_admin=False):
         "/settings — настройки\n"
         "/whoami — какая группа выбрана\n")
     if is_admin:
-        text += ("\n👑 <b>Админ</b>: /admin — статистика, обновление кэша групп и "
-                 "расписания, рассылка.")
+        text += ("\n👑 <b>Админ</b>\n"
+                 "/admin — панель: обновление групп и кэша, копия базы\n"
+                 "/stats — данные: активность, группы, домашка, другие боты\n"
+                 "/users — кто пользуется ботом (и /users csv — таблица файлом)\n"
+                 "/broadcast — рассылка: всем, активным за 7 дней или по группе\n"
+                 "/broadcasts — история рассылок\n"
+                 "/grant <id>, /revoke <id> — выдать или снять права админа")
     return text
 
 
@@ -599,8 +604,127 @@ def admin_screen(stats, groups_updated="", api_ok=True, backup_note=""):
                 api_ok="доступен ✅" if api_ok else "недоступен ❌"))
 
 
-def admin_broadcast_done(sent, failed):
-    return "📣 Рассылка завершена: доставлено %d, ошибок %d" % (sent, failed)
+def admin_broadcast_done(sent, failed, target_title=""):
+    where = " (%s)" % esc(target_title) if target_title else ""
+    return "📣 Рассылка%s завершена: доставлено %d, ошибок %d" % (where, sent, failed)
+
+
+def admin_stats_page(summary, bot_title="", provider_ok=True):
+    """Подробная сводка по боту: активность, группы, домашка, другие боты."""
+    summary = summary or {}
+    lines = [
+        "📊 <b>Данные по боту%s</b>" % ((" «%s»" % esc(bot_title)) if bot_title else ""),
+        "",
+        "👥 Всего пользователей: <b>%(total)d</b>" % summary,
+        "🎓 Выбрали группу: <b>%(with_group)d</b>" % summary,
+        "🌙 В тихом режиме: <b>%(quiet)d</b>" % summary,
+        "",
+        "<b>Активность</b>",
+        "• сегодня заходили: <b>%(active_today)d</b>" % summary,
+        "• за 7 дней: <b>%(active_week)d</b>" % summary,
+        "• новых сегодня: <b>%(new_today)d</b>" % summary,
+        "• новых за 7 дней: <b>%(new_week)d</b>" % summary,
+        "• сообщений всего: <b>%(messages)d</b>" % summary,
+        "",
+        "<b>Домашка</b>",
+        "• общих заданий группы: <b>%(homework_group)d</b>" % summary,
+        "• личных заметок: <b>%(homework_personal)d</b>" % summary,
+        "• открытых: <b>%(homework_open)d</b>" % summary,
+    ]
+    top = summary.get("top_groups") or []
+    if top:
+        lines.append("")
+        lines.append("<b>Группы</b>")
+        for item in top[:10]:
+            lines.append("• %s — %d" % (esc(item.get("group", "")), item.get("users", 0)))
+    others = summary.get("others") or []
+    if others:
+        lines.append("")
+        lines.append("<b>Другие боты в этом сервисе</b>")
+        for item in others:
+            if item.get("ok"):
+                lines.append("• %s — пользователей %d, заходили сегодня %d"
+                             % (esc(item.get("title") or item.get("bot") or "бот"),
+                                item.get("users", 0), item.get("active_today", 0)))
+            else:
+                lines.append("• %s — недоступен (%s)"
+                             % (esc(item.get("title") or item.get("bot") or "бот"),
+                                esc(str(item.get("error") or "")[:60])))
+    if not provider_ok:
+        lines.append("")
+        lines.append("⚠️ Источник расписания сейчас недоступен — данные могли устареть.")
+    return "\n".join(lines)
+
+
+def users_page(rows, page, pages, total, bot_title="", query=""):
+    """Список пользователей бота (кто, группа, когда заходил, сколько писал)."""
+    import report as report_module
+
+    header = "👥 <b>Пользователи%s</b> — всего %d\n" % (
+        (" «%s»" % esc(bot_title)) if bot_title else "", total)
+    if query:
+        header += "Поиск: <b>%s</b>\n" % esc(query)
+    if pages > 1:
+        header += "Страница %d из %d\n" % (page + 1, pages)
+    header += "\n"
+    if not rows:
+        return header + "Пока никого. Как только студенты начнут писать боту — появятся здесь."
+    lines = []
+    for index, row in enumerate(rows, start=1 + page * 10):
+        name = esc(row.get("name") or "без имени")
+        username = (" @" + esc(row["username"])) if row.get("username") else ""
+        group = esc(row.get("group") or "группа не выбрана")
+        if row.get("subgroup"):
+            group += " (%s)" % esc(row["subgroup"])
+        flags = []
+        if row.get("is_admin"):
+            flags.append("👑")
+        if row.get("quiet"):
+            flags.append("🌙")
+        lines.append("%d. <b>%s</b>%s %s" % (index, name, username, "".join(flags)))
+        lines.append("   🎓 %s · %s" % (group, report_module.format_last_seen(row.get("last_seen"))))
+        lines.append("   💬 %d · 📝 %d" % (row.get("messages") or 0, row.get("homework") or 0))
+    return header + "\n".join(lines)
+
+
+def broadcast_targets(counts, groups):
+    """Экран выбора, кому отправлять сообщение."""
+    lines = [
+        "📣 <b>Рассылка от админа</b>",
+        "",
+        "Кому отправить сообщение? Оно придёт в чат с ботом от его имени — "
+        "студенты увидят текст и поймут, что это объявление.",
+        "",
+        "• всем: <b>%d</b> чел." % counts.get("all", 0),
+        "• активным за 7 дней: <b>%d</b> чел." % counts.get("active", 0),
+    ]
+    if groups:
+        lines.append("• по группе: выбери ниже")
+    lines.append("")
+    lines.append("<i>Дальше пришли текст сообщения — покажу предпросмотр и спрошу подтверждение.</i>")
+    return "\n".join(lines)
+
+
+def broadcast_preview(text, count, target_title=""):
+    where = (" (%s)" % esc(target_title)) if target_title else ""
+    return ("📣 <b>Предпросмотр рассылки</b>%s\n"
+            "Получателей: <b>%d</b>\n\n"
+            "—————\n%s\n—————\n\n"
+            "Отправляем?" % (where, count, text))
+
+
+def broadcasts_history(rows, bot_title=""):
+    if not rows:
+        return "🕓 Рассылок пока не было."
+    lines = ["🕓 <b>История рассылок%s</b>\n" % (
+        (" «%s»" % esc(bot_title)) if bot_title else "")]
+    for row in rows:
+        preview = (row.get("text") or "").replace("\n", " ")[:60]
+        lines.append("• %s — %s: %d доставлено, %d ошибок\n   <i>%s</i>"
+                     % (esc(str(row.get("created_at") or "")[:16]),
+                        esc(row.get("target_title") or row.get("target") or "всем"),
+                        row.get("delivered") or 0, row.get("failed") or 0, esc(preview)))
+    return "\n".join(lines)
 
 
 def error_generic(detail=""):
