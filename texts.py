@@ -567,7 +567,8 @@ def help_text(user=None, is_admin=False):
                  "/admin — панель: обновление групп и кэша, копия базы\n"
                  "/stats — данные: активность, группы, домашка, другие боты\n"
                  "/users — кто пользуется ботом (и /users csv — таблица файлом)\n"
-                 "/broadcast — рассылка: всем, активным за 7 дней или по группе\n"
+                 "/broadcast — рассылка: всем, активным за 7 дней, по группе или одному\n"
+                 "/dm &lt;кому&gt; &lt;текст&gt; — личное сообщение студенту\n"
                  "/broadcasts — история рассылок\n"
                  "/grant <id>, /revoke <id> — выдать или снять права админа")
     return text
@@ -699,6 +700,7 @@ def broadcast_targets(counts, groups):
         "",
         "• всем: <b>%d</b> чел." % counts.get("all", 0),
         "• активным за 7 дней: <b>%d</b> чел." % counts.get("active", 0),
+        "• 👤 одному студенту — по имени, @username или ID",
     ]
     if groups:
         lines.append("• по группе: выбери ниже")

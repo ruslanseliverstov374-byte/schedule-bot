@@ -56,6 +56,7 @@ ADMIN_WORDS = {
     "пользователи": "/users", "/пользователи": "/users", "студенты": "/users",
     "рассылка": "/broadcast", "/рассылка": "/broadcast", "объявление": "/broadcast",
     "история": "/broadcasts", "/история": "/broadcasts",
+    "написать": "/dm", "/написать": "/dm", "личное": "/dm", "/личное": "/dm",
 }
 
 
@@ -422,6 +423,10 @@ class ScheduleBot:
         if state == "hw_due":
             self.finish_homework_due(chat_id, user, text)
             return
+        if state == "broadcast_person":
+            # Админ присылает имя, @username или ID того, кому написать.
+            self.finish_broadcast_person(chat_id, user, text)
+            return
         if state == "broadcast" or state == "broadcast_text":
             # Админ присылает текст рассылки — показываем предпросмотр с подтверждением.
             data = self.store.state_of(user) or {}
@@ -463,6 +468,7 @@ class ScheduleBot:
             "/stats": self.cmd_stats_data,
             "/broadcast": self.cmd_broadcast,
             "/broadcasts": self.cmd_broadcasts,
+            "/dm": self.cmd_dm,
             "/grant": self.cmd_grant,
             "/revoke": self.cmd_revoke,
         }
@@ -755,6 +761,12 @@ class ScheduleBot:
             navigation.append(tgbot.btn("➡️", "adm:users:%d" % (page + 1)))
         if navigation:
             buttons.append(navigation)
+        # Написать конкретному человеку можно прямо из списка.
+        for row in rows:
+            label = "✉️ %s" % (row.get("name") or "без имени")
+            if row.get("username"):
+                label += " @%s" % row["username"]
+            buttons.append([tgbot.btn(label[:60], "bc:to:%d" % row["tg_id"])])
         buttons.append([tgbot.btn("📥 Выгрузить CSV", "adm:csv"),
                         tgbot.btn("📣 Рассылка", "adm:broadcast")])
         buttons.append([tgbot.btn("👑 Админ-панель", "adm:menu")])
@@ -867,12 +879,105 @@ class ScheduleBot:
                 " GROUP BY group_title ORDER BY n DESC LIMIT 6"):
             groups[row["group_title"]] = row["n"]
         buttons = [[tgbot.btn("👥 Всем (%d)" % counts["all"], "bc:all")],
-                   [tgbot.btn("🔥 Активным за 7 дней (%d)" % counts["active"], "bc:active")]]
+                   [tgbot.btn("🔥 Активным за 7 дней (%d)" % counts["active"], "bc:active")],
+                   [tgbot.btn("👤 Одному студенту", "bc:one")]]
         for title, count in groups.items():
             buttons.append([tgbot.btn("🎓 %s (%d)" % (title, count), "bc:group:%s" % title)])
         buttons.append([tgbot.btn("✖️ Отмена", "bc:cancel")])
         text = texts.broadcast_targets(counts, groups)
         self._send_or_edit(chat_id, text, tgbot.inline(buttons), edit_message_id)
+
+    def ask_broadcast_person(self, chat_id, user, edit_message_id=None):
+        """Личное сообщение: сначала находим получателя."""
+        if not self.require_admin(chat_id, user):
+            return
+        self.store.set_state(user["tg_id"], "broadcast_person", {})
+        self._send_or_edit(
+            chat_id,
+            "👤 <b>Кому написать?</b>\n\n"
+            "Пришли имя, @username или Telegram ID студента — найду его среди тех, "
+            "кто пользуется ботом. Можно и просто открыть /users и нажать «✉️» "
+            "у нужного человека.",
+            tgbot.inline([[tgbot.btn("✖️ Отмена", "bc:cancel")]]), edit_message_id)
+
+    def finish_broadcast_person(self, chat_id, user, text):
+        """Ищет получателя по имени, нику или ID и переходит к тексту сообщения."""
+        import report
+
+        query = (text or "").strip()
+        rows = report.users_rows(self.store, limit=6, query=query, order="name")
+        if not rows:
+            self.tg.send_message(
+                chat_id,
+                "😕 По запросу «%s» никого не нашёл. Проверь написание, посмотри /users "
+                "или пришли Telegram ID." % texts.esc(query),
+                reply_markup=tgbot.inline([[tgbot.btn("✖️ Отмена", "bc:cancel")]]))
+            return
+        if len(rows) == 1:
+            row = rows[0]
+            self.ask_broadcast_text(chat_id, user, "user:%d" % row["tg_id"],
+                                    self.person_title(row))
+            return
+        buttons = []
+        for row in rows:
+            label = "👤 %s" % (row.get("name") or "без имени")
+            if row.get("username"):
+                label += " @%s" % row["username"]
+            if row.get("group"):
+                label += " · %s" % row["group"]
+            buttons.append([tgbot.btn(label[:60], "bc:to:%d" % row["tg_id"])])
+        buttons.append([tgbot.btn("✖️ Отмена", "bc:cancel")])
+        self.tg.send_message(chat_id, "Нашёл нескольких — выбери, кому написать:",
+                             reply_markup=tgbot.inline(buttons))
+
+    def person_title(self, row):
+        """Подпись получателя для предпросмотра: имя и группа."""
+        name = (row or {}).get("name") or "без имени"
+        group = (" · %s" % row["group"]) if (row or {}).get("group") else ""
+        return "%s%s" % (name, group)
+
+    def cmd_dm(self, chat_id, user, raw):
+        """Личное сообщение: /dm <имя|@username|id> <текст>.
+
+        Показывает предпросмотр и ждёт подтверждения — чтобы случайная опечатка
+        не улетела студенту.
+        """
+        if not self.require_admin(chat_id, user):
+            return
+        argument = self.command_argument(raw)
+        if not argument:
+            self.ask_broadcast_person(chat_id, user)
+            return
+        import report
+
+        best = None
+        for row in report.users_rows(self.store):
+            for token in (row.get("name"), row.get("username"), str(row.get("tg_id"))):
+                if token and argument.lower().startswith(str(token).lower()):
+                    if best is None or len(str(token)) > best[1]:
+                        best = (row, len(str(token)))
+        if not best:
+            self.tg.send_message(
+                chat_id,
+                "Не понял, кому писать. Пример: <code>/dm Софа привет!</code>\n"
+                "Или открой /users и нажми «✉️» у нужного человека.")
+            return
+        row, length = best
+        text = argument[length:].strip(" :,-—")
+        if not text:
+            self.tg.send_message(chat_id, "Добавь текст: <code>/dm %s текст сообщения</code>"
+                                 % texts.esc(str(row.get("name") or "")))
+            return
+        target = "user:%d" % row["tg_id"]
+        title = self.person_title(row)
+        self.store.set_state(user["tg_id"], "broadcast_confirm",
+                             {"target": target, "title": title, "text": text})
+        self.tg.send_message(
+            chat_id,
+            texts.broadcast_preview(texts.esc(text), len(self.broadcast_recipients(target)),
+                                    title),
+            reply_markup=tgbot.inline([
+                [tgbot.btn("✅ Отправить", "bc:send"), tgbot.btn("✖️ Отмена", "bc:cancel")]]))
 
     def cmd_broadcast(self, chat_id, user, raw):
         """Рассылка: /broadcast — выбор получателей, затем текст сообщения."""
@@ -920,7 +1025,11 @@ class ScheduleBot:
             reply_markup=tgbot.inline([[tgbot.btn("✖️ Отмена", "bc:cancel")]]))
 
     def broadcast_recipients(self, target):
-        """Кого коснётся рассылка: 'all', 'active' или 'group:<название>'."""
+        """Кого коснётся сообщение: 'all', 'active', 'group:<название>' или 'user:<id>'."""
+        if target and target.startswith("user:"):
+            raw_id = target[5:]
+            row = self.store.get_user(int(raw_id)) if raw_id.lstrip("-").isdigit() else None
+            return [row] if row else []      # личное сообщение можно и админу
         if target == "active":
             return [row for row in self.store.active_users(7) if not row.get("is_admin")]
         if target and target.startswith("group:"):
@@ -1331,6 +1440,19 @@ class ScheduleBot:
             return
         if action == "all":
             self.ask_broadcast_text(chat_id, user, "all", "всем")
+            return
+        if action == "one":
+            self.ask_broadcast_person(chat_id, user)
+            return
+        if action.startswith("to:"):
+            raw_id = action[3:]
+            row = self.store.get_user(int(raw_id)) if raw_id.isdigit() else None
+            if not row:
+                self.tg.send_message(chat_id, "Не нашёл этого пользователя — возможно, "
+                                              "он удалил чат с ботом.")
+                return
+            self.ask_broadcast_text(chat_id, user, "user:%d" % row["tg_id"],
+                                    self.person_title(row))
             return
         if action == "active":
             self.ask_broadcast_text(chat_id, user, "active", "активным за 7 дней")

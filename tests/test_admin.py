@@ -359,6 +359,86 @@ def main():
                                  for row in bot.main_keyboard(store.get_user(student))
                                  .get("keyboard", []) for button in row], None)
 
+        print("\n8. Личное сообщение конкретному студенту")
+        tg.clear()
+        send_text(bot, admin, "/broadcast")
+        buttons = [button.get("callback_data")
+                   for row in (tg.messages[-1]["keyboard"] or {}).get("inline_keyboard", [])
+                   for button in row]
+        check("в рассылке есть вариант «одному студенту»", "bc:one" in buttons, buttons)
+        tg.clear()
+        click(bot, admin, "bc:one")
+        check("бот спросил, кому писать", "Кому написать" in tg.last_text(admin),
+              tg.last_text(admin)[:80])
+        tg.clear()
+        send_text(bot, admin, "Софа")
+        check("найден один человек — бот просит текст",
+              "Пришли текст" in tg.last_text(admin), tg.last_text(admin)[:80])
+        check("в заголовке видно имя получателя", "Софа" in tg.last_text(admin),
+              tg.last_text(admin)[:120])
+        tg.clear()
+        send_text(bot, admin, "Приходи на консультацию в 18:00")
+        preview = tg.last_text(admin)
+        check("предпросмотр личного сообщения", "Предпросмотр рассылки" in preview,
+              preview[:80])
+        check("в предпросмотре один получатель", "Получателей: <b>1</b>" in preview,
+              preview[:200])
+        tg.clear()
+        click(bot, admin, "bc:send")
+        check("личное сообщение дошло адресату",
+              any("Приходи на консультацию" in item["text"] for item in tg.out(student)),
+              [item["text"][:40] for item in tg.out(student)])
+        check("другим личное сообщение не ушло",
+              not any("Приходи на консультацию" in item["text"] for item in tg.out(inactive)))
+        history = store.recent_broadcasts(5)
+        check("личное сообщение попало в историю",
+              history and history[0]["target"].startswith("user:")
+              and history[0]["delivered"] == 1, history[:1])
+
+        print("\n9. Кнопка «✉️» в списке пользователей и команда /dm")
+        tg.clear()
+        send_text(bot, admin, "/users")
+        buttons = [button.get("callback_data")
+                   for row in (tg.messages[-1]["keyboard"] or {}).get("inline_keyboard", [])
+                   for button in row]
+        check("у каждого пользователя есть кнопка «✉️»",
+              any(b.startswith("bc:to:") for b in buttons), buttons)
+        tg.clear()
+        click(bot, admin, "bc:to:%d" % student)
+        check("кнопка «✉️» сразу просит текст", "Пришли текст" in tg.last_text(admin),
+              tg.last_text(admin)[:80])
+        send_text(bot, admin, "Личное из списка")
+        click(bot, admin, "bc:send")
+        check("сообщение из списка дошло",
+              any("Личное из списка" in item["text"] for item in tg.out(student)))
+        tg.clear()
+        send_text(bot, admin, "/dm софа Проверка команды")
+        check("команда /dm показала предпросмотр",
+              "Предпросмотр рассылки" in tg.last_text(admin), tg.last_text(admin)[:80])
+        check("в предпросмотре /dm виден текст", "Проверка команды" in tg.last_text(admin),
+              tg.last_text(admin)[:200])
+        tg.clear()
+        click(bot, admin, "bc:send")
+        check("сообщение из /dm дошло",
+              any("Проверка команды" in item["text"] for item in tg.out(student)))
+        tg.clear()
+        send_text(bot, admin, "/dm НесуществующийПривет")
+        check("на незнакомое имя бот подсказывает", "Не понял, кому" in tg.last_text(admin),
+              tg.last_text(admin)[:80])
+        tg.clear()
+        send_text(bot, admin, "/broadcast")
+        click(bot, admin, "bc:one")
+        send_text(bot, admin, "С")
+        candidates = [button.get("callback_data")
+                      for row in (tg.messages[-1]["keyboard"] or {}).get("inline_keyboard", [])
+                      for button in row]
+        check("при нескольких совпадениях бот предлагает выбрать",
+              any(b.startswith("bc:to:") for b in candidates), candidates)
+        tg.clear()
+        click(bot, admin, "bc:cancel")
+        check("выбор получателя можно отменить", "отменена" in tg.last_text(admin).lower(),
+              tg.last_text(admin)[:80])
+
     finally:
         try:
             bot.store.close()
