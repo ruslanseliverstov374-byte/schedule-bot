@@ -134,13 +134,62 @@ def build_database(bot_name, target_path):
 
 
 def pack(path):
-    """Сжимает базу так же, как это делает бот перед отправкой копии."""
+    """Собирает копию тем же способом, что и бот.
+
+    Важно: нельзя просто прочитать файл базы — часть изменений может лежать в
+    журнале WAL, и копия окажется устаревшей. backup_bytes делает согласованный
+    снимок через SQLite и сжимает его.
+    """
+    from snapshot import backup_bytes
+
     packed = path + ".gz"
-    with open(path, "rb") as handle:
-        raw = handle.read()
+    blob = backup_bytes(path)
     with open(packed, "wb") as handle:
-        handle.write(gzip.compress(raw, 6))
+        handle.write(blob)
     return packed
+
+
+def verify_pinned(token, owner_id, expected_users):
+    """Скачивает закреплённую копию обратно и проверяет, что в ней нужные данные."""
+    chat = api(token, "getChat", {"chat_id": owner_id})
+    pinned = ((chat.get("result") or {}).get("pinned_message") or {})
+    document = pinned.get("document") or {}
+    if not document.get("file_id"):
+        return False, "в чате нет закреплённого файла"
+    info = api(token, "getFile", {"file_id": document["file_id"]})
+    if not info.get("ok"):
+        return False, "файл не получен: %s" % str(info)[:120]
+    url = "https://api.telegram.org/file/bot%s/%s" % (token, info["result"]["file_path"])
+    with urllib.request.urlopen(url, timeout=120) as response:
+        blob = response.read()
+    raw = gzip.decompress(blob) if blob[:2] == b"\x1f\x8b" else blob
+    check_path = os.path.join(ROOT, "data", "_verify.db")
+    with open(check_path, "wb") as handle:
+        handle.write(raw)
+    try:
+        connection = sqlite3.connect("file:%s?mode=ro" % check_path.replace(os.sep, "/"),
+                                     uri=True)
+        try:
+            users = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            groups = connection.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
+            provider = ""
+            try:
+                row = connection.execute(
+                    "SELECT value FROM meta WHERE key='provider'").fetchone()
+                provider = row[0] if row else ""
+            except sqlite3.Error:
+                pass
+        finally:
+            connection.close()
+        ok = users >= expected_users
+        return ok, "в копии пользователей %d (ждали %d), групп %d, вуз %s" % (
+            users, expected_users, groups, provider or "не указан")
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(check_path + suffix)
+            except OSError:
+                pass
 
 
 def main():
@@ -186,6 +235,10 @@ def main():
                           {"chat_id": owner_id, "message_id": old_pinned})
             print("   старая копия (%s) удалена: %s"
                   % (old_pinned, "ок" if removed.get("ok") else removed))
+        expected = len(RECOVER_USERS[bot_name])
+        ok, detail = verify_pinned(token, owner_id, expected)
+        print("   проверка закреплённой копии: %s — %s"
+              % ("ок" if ok else "ПРОБЛЕМА", detail))
     return 0
 
 
