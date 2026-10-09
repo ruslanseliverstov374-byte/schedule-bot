@@ -28,6 +28,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
@@ -47,6 +48,9 @@ CAPTION_PREFIX = "💾 Копия базы расписания:"
 META_MESSAGE_ID = "snapshot_message_id"
 META_SAVED_AT = "snapshot_saved_at"
 META_SAVES_COUNT = "snapshot_saves_count"
+#: Сколько пользователей было в последней сохранённой копии: нужно, чтобы
+#: не перезаписать хорошую копию пустой базой после неудачного перезапуска.
+META_SAVED_USERS = "snapshot_users"
 
 #: Сколько секунд между проверками в фоновом потоке.
 CHECK_INTERVAL_SECONDS = 60
@@ -217,10 +221,32 @@ def _looks_like_bot_db(path):
         connection.close()
 
 
-def restore_bytes(blob, db_path):
+def database_provider(db_path):
+    """Вуз, которому принадлежит база (meta.provider) — '' если не определить.
+
+    Нужно при восстановлении: в одном сервисе живут два бота, и база одного вуза
+    не должна подниматься у другого.
+    """
+    try:
+        connection = sqlite3.connect(
+            "file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db_path)),
+            uri=True, timeout=15)
+        try:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key='provider'").fetchone()
+        finally:
+            connection.close()
+        return str(row[0]).strip() if row and row[0] else ""
+    except sqlite3.Error:
+        return ""
+
+
+def restore_bytes(blob, db_path, expected_provider=""):
     """Распаковать, проверить целостность SQLite, атомарно заменить базу.
 
     True — восстановлено, False — снимок негодный (база не тронута).
+    ``expected_provider`` — имя вуза бота: если в копии другой вуз, восстановление
+    отменяется, иначе бот КГАСУ работал бы с расписанием ПГУФКСиТ.
     """
     db_path = os.path.abspath(str(db_path or ""))
     if not db_path:
@@ -234,6 +260,10 @@ def restore_bytes(blob, db_path):
                 return False
             if not _looks_like_bot_db(temp_db):
                 return False
+            if expected_provider:
+                found = database_provider(temp_db)
+                if found and found != expected_provider:
+                    return False
             # Рабочую базу трогаем только после всех проверок — замена атомарная.
             try:
                 os.replace(temp_db, db_path)
@@ -290,11 +320,12 @@ def remember_source(db_path, pinned, logger=print):
     return True
 
 
-def restore_from_chat(tg, owner_id, db_path, logger=print):
+def restore_from_chat(tg, owner_id, db_path, logger=print, expected_provider=""):
     """Найти у владельца ЗАКРЕПЛЁННОЕ сообщение с копией и восстановить базу.
 
     Ничего не бросает наружу: при любой неудаче пишет понятную строку в лог
     и возвращает False, оставляя текущую базу нетронутой.
+    ``expected_provider`` — вуз бота: копия другого вуза не восстанавливается.
     """
     log = logger or (lambda message: None)
     db_path = os.path.abspath(str(db_path or ""))
@@ -315,7 +346,7 @@ def restore_from_chat(tg, owner_id, db_path, logger=print):
         with open(temp_path, "rb") as handle:
             blob = handle.read()
 
-        if restore_bytes(blob, db_path):
+        if restore_bytes(blob, db_path, expected_provider=expected_provider):
             remember_source(db_path, pinned, log)
             log("база восстановлена из закреплённой копии в чате владельца (%d КБ)"
                 % (len(blob) // 1024))
@@ -467,6 +498,16 @@ class SnapshotManager:
         if not force and self._db_unchanged():
             self.log("база не менялась с прошлого снимка — всё равно делаю копию")
 
+        # Защита от «отравления» копии: если в базе не осталось пользователей,
+        # а раньше они были, копию не перезаписываем. Иначе один неудачный
+        # перезапуск стирает данные навсегда.
+        users_now = self._users_count()
+        users_before = self._last_saved_users()
+        if users_now == 0 and users_before:
+            self._fail("в базе 0 пользователей, а в прошлой копии было %d — "
+                       "копию не перезаписываю" % users_before)
+            return False
+
         try:
             blob = backup_bytes(db_path)
         except Exception as err:
@@ -474,7 +515,11 @@ class SnapshotManager:
             return False
 
         directory = os.path.dirname(db_path) or "."
-        temp_path = os.path.join(directory, BACKUP_FILENAME)
+        # Имя временного файла делаем уникальным: в одном сервисе могут работать
+        # два бота, и раньше они писали копию в один и тот же файл — из-за гонки
+        # бот КГАСУ отправлял в свой чат базу ПГУФКСиТ (и наоборот).
+        temp_path = os.path.join(
+            directory, "%s-%s" % (uuid.uuid4().hex[:8], BACKUP_FILENAME))
         caption = "%s %s UTC" % (CAPTION_PREFIX, _utc_text())
         try:
             os.makedirs(directory, exist_ok=True)
@@ -531,6 +576,7 @@ class SnapshotManager:
         self._set_meta(META_SAVED_AT, datetime.fromtimestamp(
             self.last_saved_at, timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         self._set_meta(META_SAVES_COUNT, self.saves_count)
+        self._set_meta(META_SAVED_USERS, users_now)
         self._signature = self._signature_of_db()
         if edited:
             self.log("копия базы обновлена в прежнем сообщении: %d КБ, сообщение %s"
@@ -539,6 +585,21 @@ class SnapshotManager:
             self.log("копия базы закреплена в чате владельца: %d КБ, сообщение %s"
                      % (len(blob) // 1024, message_id))
         return True
+
+    def _users_count(self):
+        """Сколько пользователей в текущей базе (0 при любой проблеме)."""
+        try:
+            return int(self.store.count_users())
+        except Exception:
+            return 0
+
+    def _last_saved_users(self):
+        """Сколько пользователей было в прошлой сохранённой копии."""
+        try:
+            raw = self.store.get_meta(META_SAVED_USERS)
+        except Exception:
+            return 0
+        return int(raw) if str(raw or "").strip().isdigit() else 0
 
     def request_save(self, delay_seconds=SAVE_REQUEST_DELAY_SECONDS):
         """Попросить сохранить базу после важных изменений (ДЗ, смена группы).

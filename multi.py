@@ -66,12 +66,17 @@ def token_info(token):
         return None, None, str(error)[:160]
 
 
-def restore_if_needed(token, db_path, owner_id, logger):
-    """Поднимает базу из закреплённой копии, если файла базы нет (облако)."""
+def restore_if_needed(token, db_path, owner_id, logger, provider=""):
+    """Поднимает базу из закреплённой копии, если файла базы нет (облако).
+
+    ``provider`` — вуз бота: копия чужого вуза не восстанавливается (в одном
+    сервисе живут два бота, и раньше они могли перепутать базы).
+    """
     if not owner_id or os.path.exists(db_path):
         return False
     try:
-        restored = restore_from_chat(tgbot.Telegram(token), int(owner_id), db_path, logger)
+        restored = restore_from_chat(tgbot.Telegram(token), int(owner_id), db_path, logger,
+                                     expected_provider=provider)
         if restored:
             logger("База восстановлена из закреплённой копии в чате")
         return restored
@@ -119,7 +124,8 @@ def main(argv=None):
         """Проверяет токен, восстанавливает базу и создаёт бота."""
         bot_id, username, error = token_info(token)
         entry = {"name": name, "title": title, "bot_id": bot_id,
-                 "username": username, "state": "запускается", "error": error}
+                 "username": username, "state": "запускается", "error": error,
+                 "users": 0, "groups": 0}
         if error:
             auth_problem = any(word in error.lower()
                                for word in ("unauthorized", "not found", "401", "404"))
@@ -131,11 +137,17 @@ def main(argv=None):
             if auth_problem:
                 return None
         logger = make_logger(prefix=prefix)
-        restore_if_needed(token, db_path, owner_id, logger)
+        restore_if_needed(token, db_path, owner_id, logger, provider=university)
         bot = ScheduleBot(token, db_path=db_path,
                           refresh_minutes=refresh_value or refresh, logger=logger,
                           owner_id=owner_id, webhook_base=webhook_base_value,
                           port=port_value, university=university)
+        # Сколько данных поднялось: сразу видно, восстановилась база или пустая.
+        try:
+            entry["users"] = bot.store.count_users()
+            entry["groups"] = bot.store.groups_count()
+        except Exception:
+            pass
         if entry not in entries:
             entries.append(entry)
         write_status(entries)
@@ -186,7 +198,7 @@ def main(argv=None):
                                   name="bot-%s" % bot.provider.name, daemon=True)
         thread.start()
         threads.append(thread)
-        _watch(entry, entries, thread)
+        _watch(entry, entries, thread, bot)
     try:
         for thread in threads:
             thread.join()
@@ -199,12 +211,18 @@ def main(argv=None):
                 pass
 
 
-def _watch(entry, entries, thread):
+def _watch(entry, entries, thread, bot=None):
     """Через несколько секунд отмечает бота как работающего, если он не упал."""
     def check():
         thread.join(timeout=15)
         if thread.is_alive():
             entry["state"] = "работает"
+            if bot is not None:
+                try:
+                    entry["users"] = bot.store.count_users()
+                    entry["groups"] = bot.store.groups_count()
+                except Exception:
+                    pass
             write_status(entries)
     threading.Thread(target=check, daemon=True).start()
 

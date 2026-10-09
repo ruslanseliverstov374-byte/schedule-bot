@@ -514,6 +514,62 @@ def check_threads(workdir, store, tg, logs):
 
 # ---------------------------------------------------------------------- запуск
 
+def check_guards(workdir):
+    """Защита от пустой копии и от копии чужого вуза.
+
+    История: в одном сервисе работали два бота, писали копию в один и тот же
+    файл и восстанавливались из чужих баз. Плюс пустая база могла затереть
+    хорошую копию. Эти проверки следят, чтобы такое не повторилось.
+    """
+    import snapshot
+
+    # 1. Копия чужого вуза не восстанавливается.
+    primary = os.path.join(workdir, "guards")
+    os.makedirs(primary, exist_ok=True)
+    foreign = os.path.join(primary, "kgasu.db")
+    seed_db(foreign, user_id=777, group="26ЗК01")
+    store = Store(foreign)
+    store.set_meta("provider", "kgasu")
+    blob = backup_bytes(foreign)
+    check("снимок знает свой вуз", snapshot.database_provider(foreign) == "kgasu",
+          snapshot.database_provider(foreign))
+
+    target = os.path.join(primary, "bot.db")
+    seed_db(target, user_id=555, group="26281")
+    check("копия чужого вуза отклонена",
+          restore_bytes(blob, target, expected_provider="unifirst") is False)
+    check("после отказа своя база цела", user_row(target, 555) is not None)
+    check("копия своего вуза принимается",
+          restore_bytes(blob, target, expected_provider="kgasu") is True)
+    check("после восстановления в базе пользователь КГАСУ",
+          user_row(target, 777) is not None)
+
+    # 2. Пустая база не перезаписывает хорошую копию.
+    empty_dir = os.path.join(workdir, "guards-empty")
+    os.makedirs(empty_dir, exist_ok=True)
+    empty_db = os.path.join(empty_dir, "bot.db")
+    empty_store = Store(empty_db)
+    empty_store.set_meta("provider", "unifirst")
+    empty_store.set_meta(snapshot.META_SAVED_USERS, "3")
+    tg = FakeTelegram()
+    manager = SnapshotManager(tg, empty_store, OWNER_ID, interval_minutes=0,
+                              logger=lambda message: None)
+    check("пустая база не перезаписывает копию", manager.save(force=True) is False)
+    check("копия при этом не отправлялась", not tg.documents)
+    check("в логе объяснение про 0 пользователей",
+          any("0 пользователей" in str(item) for item in [manager.last_error]),
+          manager.last_error)
+
+    # 3. Если пользователи есть — копия делается как обычно.
+    seed_db(empty_db, user_id=999, group="26282")
+    empty_store.set_meta("provider", "unifirst")
+    check("с пользователями копия сохраняется", manager.save(force=True) is True)
+    check("файл копии ушёл в чат", len(tg.documents) == 1, tg.documents)
+    check("имя файла — как у обычной копии",
+          str(tg.documents[0].get("filename")).endswith("schedule-backup.db.gz"),
+          tg.documents[0].get("filename"))
+
+
 def main():
     workdir = make_workdir()
     logs = []
@@ -527,6 +583,9 @@ def main():
 
         print("\n3. Фоновый поток и безопасная остановка")
         check_threads(workdir, manager.store, manager.tg, logs)
+
+        print("\n4. Защита копий: пустая база и чужой вуз")
+        check_guards(workdir)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

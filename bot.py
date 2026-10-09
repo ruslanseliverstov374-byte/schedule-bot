@@ -506,7 +506,8 @@ class ScheduleBot:
             self.tg.send_message(
                 chat_id,
                 "Не понял сообщение. Выбери пункт меню или отправь /help.\n"
-                "Если хочешь сменить группу — напиши её номер, например <code>26281</code>.",
+                "Если хочешь сменить группу — напиши её код, например <code>%s</code>."
+                % texts.esc(self.example_group()),
                 reply_markup=self.main_keyboard())
 
     # ------------------------------------------------------------- клавиатуры
@@ -1221,11 +1222,14 @@ class ScheduleBot:
                     return
                 break
         if not groups:
+            # Подсказка про формат зависит от вуза: у ПГУФКСиТ это «26281»,
+            # у КГАСУ — «26ЗК01» (буквы и цифры, иногда с «з» на конце).
             self.tg.send_message(
                 chat_id,
                 "😕 Группу <b>%s</b> не нашёл.\n"
-                "Напиши только цифры, например <code>26281</code>, или посмотри "
-                "список: /start" % texts.esc(query))
+                "Напиши её так, как она записана в вузе, например <code>%s</code>, "
+                "или посмотри список: /start"
+                % (texts.esc(query), texts.esc(self.example_group())))
             return
         if len(groups) == 1:
             self.apply_group(chat_id, user, groups[0])
@@ -2088,8 +2092,13 @@ def main(argv=None):
     if owner_id.isdigit() and not os.path.exists(arguments.db):
         logger("Базы нет — пробую восстановить из чата владельца %s..." % owner_id)
         try:
+            expected = providers.make_provider(arguments.university or
+                                               env_value("UNIVERSITY", "unifirst")).name
+        except providers.ProviderError:
+            expected = ""
+        try:
             if restore_from_chat(tgbot.Telegram(token), int(owner_id),
-                                 arguments.db, logger):
+                                 arguments.db, logger, expected_provider=expected):
                 logger("База восстановлена, данные на месте")
             else:
                 logger("Копии в чате нет — начинаю с чистой базы")
