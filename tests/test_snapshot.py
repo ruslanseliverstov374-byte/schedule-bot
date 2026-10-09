@@ -560,10 +560,16 @@ def check_guards(workdir):
           any("0 пользователей" in str(item) for item in [manager.last_error]),
           manager.last_error)
 
-    # 3. Если пользователи есть — копия делается как обычно.
+    # 3. Пользователи есть, но их стало меньше — тоже не перезаписываем.
     seed_db(empty_db, user_id=999, group="26282")
     empty_store.set_meta("provider", "unifirst")
-    check("с пользователями копия сохраняется", manager.save(force=True) is True)
+    check("падение числа пользователей блокирует копию", manager.save(force=True) is False)
+    check("и об этом сказано в логе", "прошлой копии было" in str(manager.last_error),
+          manager.last_error)
+
+    # 4. Потерь нет — копия делается как обычно.
+    empty_store.set_meta(snapshot.META_SAVED_USERS, "1")
+    check("без потерь копия сохраняется", manager.save(force=True) is True)
     check("файл копии ушёл в чат", len(tg.documents) == 1, tg.documents)
     check("имя файла — как у обычной копии",
           str(tg.documents[0].get("filename")).endswith("schedule-backup.db.gz"),
