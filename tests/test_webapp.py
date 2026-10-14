@@ -474,6 +474,38 @@ def main():
         slow_release.set()
         shared_queues.stop()
 
+    print("\n11. /service.json отдаёт счётчики и последнюю ошибку")
+
+    def broken_handler(update):
+        raise RuntimeError("тестовый сбой обработки")
+
+    diag = StatusApp(FakeStore(), on_update=broken_handler, webhook_secret=SECRET,
+                     bot_username=BOT_USERNAME, engine=None,
+                     logger=lambda message: None)
+    apps.append(diag)
+    diag_port = diag.start(port=0, host="127.0.0.1")
+    try:
+        code, _, body = call(diag_port, "GET", "/service.json")
+        data = json.loads(body)
+        check("service.json отвечает 200", code == 200, code)
+        check("в service.json есть блок updates", isinstance(data.get("updates"), dict),
+              sorted(data))
+        check("счётчики начинаются с нуля",
+              data["updates"]["received"] == 0 and data["updates"]["errors"] == 0,
+              data.get("updates"))
+        post_update(diag_port, {"update_id": 21, "message": {"text": "раз"}})
+        check("сбой обработки попал в счётчик",
+              wait_for(lambda: json.loads(call(diag_port, "GET", "/service.json")[2])
+                       ["updates"]["errors"] == 1), None)
+        data = json.loads(call(diag_port, "GET", "/service.json")[2])
+        check("в service.json видна причина сбоя",
+              "тестовый сбой обработки" in (data["updates"]["last_error"] or ""),
+              data["updates"].get("last_error"))
+        check("видно время последнего обновления",
+              bool(data["updates"].get("last_update_at")), data["updates"])
+    finally:
+        diag.stop()
+
     print("\n" + "=" * 60)
     print("Проверок: %d, провалов: %d" % (len(CHECKS), len(FAILURES)))
     if FAILURES:

@@ -249,6 +249,10 @@ class StatusApp:
         self._counters = {"updates_received": 0, "updates_handled": 0, "errors": 0}
         self._started_at = None
         self._server = None
+        #: Последняя ошибка обработки и время последнего обновления — их отдаёт
+        #: /service.json, чтобы диагностировать сбои без доступа к логам Render.
+        self.last_error = ""
+        self.last_update_at = ""
         self._server_thread = None
         self._worker_thread = None
         self._workers = []
@@ -404,11 +408,13 @@ class StatusApp:
     def _handle_update(self, update, handler=None):
         """Вызывает обработчик и ведёт счётчики. Исключения наружу не выходят."""
         target = handler if handler is not None else self.on_update
+        self.last_update_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         try:
             if target is not None:
                 target(update)
         except Exception as error:
             self._bump("errors")
+            self.last_error = "%s: %s" % (type(error).__name__, str(error)[:160])
             self.log("Ошибка обработки обновления: %s" % error)
             return
         self._bump("updates_handled")
@@ -606,8 +612,8 @@ class _StatusHandler(BaseHTTPRequestHandler):
         self._not_found(head_only)
 
     def _service_json(self, head_only):
-        # Файл состояния пишет multi.py рядом с базой; путь берём от самого
-        # webapp.py, чтобы не тянуть сюда bot.py (иначе круговой импорт).
+        # Файл состояния пишет multi.py рядом с базой; сюда же добавляем счётчики
+        # и последнюю ошибку обработки — так причину видно снаружи, без панели.
         here = os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(here, "data", "service-status.json")
         payload = {"bots": [], "note": "состояние пишет multi.py"}
@@ -617,6 +623,16 @@ class _StatusHandler(BaseHTTPRequestHandler):
                     payload = json.load(handle)
         except Exception as error:
             payload = {"bots": [], "error": str(error)}
+        app = self._app()
+        stats = app.stats() if app is not None else {}
+        payload["updates"] = {
+            "received": stats.get("updates_received", 0),
+            "handled": stats.get("updates_handled", 0),
+            "errors": stats.get("errors", 0),
+            "started_at": stats.get("started_at"),
+            "last_error": getattr(app, "last_error", "") if app is not None else "",
+            "last_update_at": getattr(app, "last_update_at", "") if app is not None else "",
+        }
         body = json.dumps(payload, ensure_ascii=False, indent=2)
         self._send(200, body, "application/json; charset=utf-8", head_only=head_only)
 
