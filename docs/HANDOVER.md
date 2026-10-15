@@ -94,6 +94,11 @@ keepalive.yml       Render проверяет          закреплённая 
 
 1. **Расписание** бот берёт тем же API, что и сайт `timetable.unifirst.ru`: предмет, тип
    занятия, точное время, аудитория, преподаватель. Никакого разбора HTML.
+   Смотреть можно на **любой день**: кнопки «📅 Сегодня», «📅 Завтра», «🔎 Другой день»
+   (дата пишется словами: `15.10`, `вчера`, `через 3 дня`, `пн`), «🗓 Неделя» и
+   «🗓 След. неделя». Дату можно просто отправить сообщением — бот поймёт; листать
+   дни удобно кнопками «⬅️ Предыдущий» / «Следующий ➡️». Прошедшие даты доступны
+   так же, как будущие (расписание семестра хранится целиком).
 2. **Актуальность** — каждые 20 минут бот сам перезапрашивает текущую и следующую неделю
    для групп, на которые кто-то подписан, и сравнивает с сохранённой версией. Изменилось —
    подписчикам уходит сообщение с точными правками (что убрали, что добавили, где сменилась
@@ -125,18 +130,26 @@ keepalive.yml       Render проверяет          закреплённая 
 
 ```bash
 python bot.py --check                    # связь с API расписания, база, разбор дат и ДЗ
-python tests/simulate.py                 # 65 проверок сценариев бота (офлайн)
+python tests/simulate.py                 # 80 проверок сценариев бота (офлайн)
 python tests/test_mock_api.py            # 46 проверок мока API
-python tests/test_webapp.py              # 54 проверки health-страницы и вебхуков
-python tests/test_snapshot.py            # 54 проверки копий базы
+python tests/test_webapp.py              # 67 проверок health-страницы и вебхуков
+python tests/test_snapshot.py            # 73 проверки копий базы и защиты данных
 python tests/test_docxparse.py           # 53 проверки парсера .docx (КГАСУ)
 python tests/test_docparse.py            # 53 проверки парсера старого .doc
-python tests/test_kgasu.py               # 45 проверок источника КГАСУ
-python tests/test_report.py              # сводки и выгрузки по пользователям
-python tests/test_admin.py               # админ-функции: рассылка и данные
-check.bat                                # всё сразу (10 наборов)
+python tests/test_kgasu.py               # 49 проверок источника КГАСУ
+python tests/test_pdfparse.py            # 110 проверок разбора PDF-сканов (OCR)
+python tests/test_report.py              # 95 проверок сводок и выгрузок
+python tests/test_admin.py               # 98 проверок админ-функций
+check.bat                                # всё сразу (11 наборов)
 python tools/preview.py 26282            # как выглядят экраны бота на живых данных
 python tools/kgasu_preview.py 26ЗК01     # расписание группы КГАСУ на живых данных
+python tools/smoke_user.py 26282         # прогон бота по всем экранам студента
+python tools/monitor.py                  # полная проверка: сервис, боты, доставка, расписание
+python tools/ping_bot.py --university kgasu --text "📅 Сегодня"   # запрос боту изнутри
+python tools/check_backups.py --owner-id 1368878379              # копии баз и кэш расписания
+python tools/check_groups.py --students 26282 26281   # список групп вуза сейчас
+python tools/check_changes.py 26282      # нет ли ложных «изменений расписания»
+python tools/announce.py --university unifirst --text-file data/announce.txt  # объявление
 python tools/watch_kgasu_cloud.py        # ждёт, пока бот КГАСУ поднимется в облаке
 python tools/cloud_check.py --owner-id 1368878379            # проверить копии базы
 python tools/cloud_check.py --owner-id 1368878379 --disaster-test   # аварийное восстановление

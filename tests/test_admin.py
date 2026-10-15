@@ -216,10 +216,11 @@ def main():
         after = store.get_user(admin)
         check("счётчик сообщений растёт", (after.get("messages_count") or 0) >= before + 2,
               (before, after.get("messages_count")))
-        # Время в базе пишется в UTC, поэтому сравниваем именно изменение отметки,
-        # а не дату: после полуночи по Казани сутки в UTC ещё вчерашние.
-        check("время последнего визита обновилось",
-              bool(after.get("last_seen")) and after["last_seen"] > before_seen,
+        # Время в базе пишется в UTC и с точностью до секунды, поэтому проверяем,
+        # что отметка не откатилась назад: два сообщения подряд попадают в одну
+        # секунду, и «строго больше» здесь было бы ошибкой теста.
+        check("время последнего визита не откатилось",
+              bool(after.get("last_seen")) and after["last_seen"] >= before_seen,
               (before_seen, after.get("last_seen")))
 
         print("\n4. Данные: список пользователей и CSV")
