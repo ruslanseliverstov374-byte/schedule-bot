@@ -216,10 +216,11 @@ def main():
         after = store.get_user(admin)
         check("счётчик сообщений растёт", (after.get("messages_count") or 0) >= before + 2,
               (before, after.get("messages_count")))
+        # Время в базе пишется в UTC, поэтому сравниваем именно изменение отметки,
+        # а не дату: после полуночи по Казани сутки в UTC ещё вчерашние.
         check("время последнего визита обновилось",
-              bool(after.get("last_seen")) and after["last_seen"] >= before_seen and
-              after["last_seen"].startswith(datetime.now().strftime("%Y-%m-%d")),
-              after.get("last_seen"))
+              bool(after.get("last_seen")) and after["last_seen"] > before_seen,
+              (before_seen, after.get("last_seen")))
 
         print("\n4. Данные: список пользователей и CSV")
         store.update_user(student, group_title="26281", subgroup="Подгруппа 1")

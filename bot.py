@@ -61,6 +61,14 @@ ADMIN_WORDS = {
     "написать": "/dm", "/написать": "/dm", "личное": "/dm", "/личное": "/dm",
 }
 
+#: Слова-синонимы кнопок: можно написать текстом вместо нажатия кнопки.
+MENU_WORDS = {
+    "дата": texts.BTN_DAY, "другой день": texts.BTN_DAY, "на дату": texts.BTN_DAY,
+    "расписание на дату": texts.BTN_DAY, "выбрать день": texts.BTN_DAY,
+    "следующая неделя": texts.BTN_NEXT_WEEK, "след неделя": texts.BTN_NEXT_WEEK,
+    "след. неделя": texts.BTN_NEXT_WEEK, "на следующую неделю": texts.BTN_NEXT_WEEK,
+}
+
 
 # ------------------------------------------------------------------ служебное
 
@@ -196,7 +204,9 @@ class ScheduleBot:
             {"command": "start", "description": "Выбрать группу и начать"},
             {"command": "today", "description": "Расписание на сегодня"},
             {"command": "tomorrow", "description": "Расписание на завтра"},
+            {"command": "day", "description": "Расписание на любой день"},
             {"command": "week", "description": "Расписание на неделю"},
+            {"command": "nextweek", "description": "Расписание на следующую неделю"},
             {"command": "hw", "description": "Домашние задания"},
             {"command": "refresh", "description": "Проверить актуальность расписания"},
             {"command": "settings", "description": "Настройки и напоминания"},
@@ -518,7 +528,24 @@ class ScheduleBot:
             self.handle_command(chat_id, user, ADMIN_WORDS[text.lower()], text)
             return
 
+        # Слова вместо кнопок: «дата», «следующая неделя».
+        if text.lower() in MENU_WORDS:
+            self.handle_button(chat_id, user, MENU_WORDS[text.lower()])
+            return
+
+        # Просто дата в сообщении — показываем расписание на этот день:
+        # студенту удобнее написать «15.10» или «вчера» в любой момент.
+        if user.get("group_title") and len(text) <= 24:
+            day = parse_day_request(text, self.local_today(user))
+            if day is not None:
+                self.send_day(chat_id, user, day)
+                return
+
         state = user.get("state") or ""
+        if state == "day_input":
+            # Пользователь присылает дату, на которую показать расписание.
+            self.finish_day_input(chat_id, user, text)
+            return
         if state == "hw_input":
             self.finish_homework_input(chat_id, user, text)
             return
@@ -559,6 +586,8 @@ class ScheduleBot:
             "/tomorrow": lambda c, u, a: self.send_day(
                 c, u, self.local_today(u) + timedelta(days=1)),
             "/week": self.cmd_week,
+            "/day": self.cmd_day,
+            "/nextweek": self.cmd_next_week,
             "/hw": self.cmd_homework,
             "/refresh": self.cmd_refresh,
             "/settings": self.cmd_settings,
@@ -584,6 +613,10 @@ class ScheduleBot:
     def handle_button(self, chat_id, user, label):
         if label == texts.BTN_ADMIN:
             self.cmd_admin(chat_id, user, "")
+        elif label == texts.BTN_DAY:
+            self.ask_day(chat_id, user)
+        elif label == texts.BTN_NEXT_WEEK:
+            self.send_next_week(chat_id, user)
         elif label == texts.BTN_TODAY:
             self.send_day(chat_id, user, self.local_today(user))
         elif label == texts.BTN_TOMORROW:
@@ -1238,24 +1271,90 @@ class ScheduleBot:
             row = self.store.get_timetable(group_title, year, week)
             return (row["lessons"] if row else []), False
 
-    def send_day(self, chat_id, user, day):
+    def send_day(self, chat_id, user, day, actions=None):
         if not self.require_group(chat_id, user):
             return
         self.tg.send_chat_action(chat_id)
         lessons, online = self.lessons_of(chat_id, user, day)
         day_lessons = [item for item in lessons if item.get("date") == day.isoformat()]
         day_lessons = providers.filter_by_subgroup(day_lessons, user.get("subgroup"))
-        text = texts.day_schedule(day, day_lessons, user.get("group_title"))
+        # Подпись для прошедших и далёких дней: студент должен понимать,
+        # что это не «сегодня» и что расписание могло поменяться.
+        today = self.local_today(user)
+        when = ""
+        if day < today - timedelta(days=1):
+            when = "Прошедший день"
+        elif day == today - timedelta(days=1):
+            when = "Вчера"
+        elif day > today + timedelta(days=1):
+            when = "Заранее: расписание могут изменить"
+        text = texts.day_schedule(day, day_lessons, user.get("group_title"), note=when)
         note = texts.cache_note(online=online)
         if note:
             text += "\n\n" + note
         rows = []
         if day_lessons:
             rows.append([tgbot.btn("📝 ДЗ по предмету", "hwp:%s" % day.isoformat())])
+        # Листать дни можно кнопками: так удобно посмотреть и прошедшие даты.
+        rows.append([tgbot.btn("⬅️ Предыдущий", "d:%s" % (day - timedelta(days=1)).isoformat()),
+                     tgbot.btn("Следующий ➡️", "d:%s" % (day + timedelta(days=1)).isoformat())])
         rows.append([tgbot.btn("🗓 Неделя", "wk:%d:%d" % unifirst.iso_year_week(day)),
                      tgbot.btn("🔄 Обновить", "r:%d:%d" % unifirst.iso_year_week(day))])
         rows.append([tgbot.btn("🏠 Меню", "menu")])
         self.tg.send_message(chat_id, text, reply_markup=tgbot.inline(rows))
+
+    def ask_day(self, chat_id, user):
+        """Спрашивает дату, на которую показать расписание."""
+        self.store.set_state(user["tg_id"], "day_input")
+        example = self.local_today(user).strftime("%d.%m")
+        self.tg.send_message(
+            chat_id, texts.ask_day(example),
+            reply_markup=tgbot.inline([[tgbot.btn("📅 Сегодня", "d:%s" % self.local_today(user).isoformat()),
+                                        tgbot.btn("✖️ Отмена", "menu")]]))
+
+    def finish_day_input(self, chat_id, user, text):
+        """Разбирает дату из сообщения и показывает расписание на неё."""
+        day = parse_day_request(text, self.local_today(user))
+        if day is None:
+            self.tg.send_message(
+                chat_id,
+                "😕 Не понял дату «%s».\n\n"
+                "Напиши так: <code>15.10</code>, <code>вчера</code>, "
+                "<code>через 3 дня</code>, <code>пн</code> — или выбери кнопкой ниже."
+                % texts.esc(text[:40]),
+                reply_markup=tgbot.inline([[tgbot.btn("✖️ Отмена", "menu")]]))
+            return
+        today = self.local_today(user)
+        if abs((day - today).days) > 200:
+            self.tg.send_message(
+                chat_id,
+                "Эта дата слишком далеко от сегодняшней (%s). Расписание хранится "
+                "в пределах семестра." % texts.esc(day.strftime("%d.%m.%Y")),
+                reply_markup=tgbot.inline([[tgbot.btn("🔎 Другую дату", "day")],
+                                           [tgbot.btn("🏠 Меню", "menu")]]))
+            return
+        self.store.set_state(user["tg_id"], "")
+        self.send_day(chat_id, user, day)
+
+    def send_next_week(self, chat_id, user):
+        """Расписание на следующую неделю (отдельная кнопка)."""
+        if not self.require_group(chat_id, user):
+            return
+        year, week = unifirst.iso_year_week(self.local_today(user))
+        year, week = unifirst.shift_week(year, week, 1)
+        self.send_week(chat_id, user, year, week)
+
+    def cmd_day(self, chat_id, user, raw):
+        """Расписание на конкретный день: /day 15.10, /day через 3 дня."""
+        argument = self.command_argument(raw)
+        if not argument:
+            self.ask_day(chat_id, user)
+            return
+        self.finish_day_input(chat_id, user, argument)
+
+    def cmd_next_week(self, chat_id, user, raw):
+        """Расписание на следующую неделю."""
+        self.send_next_week(chat_id, user)
 
     def send_week(self, chat_id, user, year, week):
         if not self.require_group(chat_id, user):
@@ -1624,6 +1723,16 @@ class ScheduleBot:
             self.apply_subgroup_label(chat_id, user, int(parts[1]))
         elif head == "wk":
             self.send_week(chat_id, user, int(parts[1]), int(parts[2]))
+        elif head == "d":
+            # Кнопки «предыдущий/следующий день» и быстрый выбор даты.
+            if len(parts) > 1 and parts[1]:
+                day = _parse_iso(parts[1])
+                if day:
+                    self.send_day(chat_id, user, day)
+                    return
+            self.ask_day(chat_id, user)
+        elif head == "day":
+            self.ask_day(chat_id, user)
         elif head == "r":
             self.cmd_refresh(chat_id, user, "")
         elif head == "hw":
@@ -2017,6 +2126,26 @@ WEEKDAY_NAMES = {
 }
 
 
+def parse_day_request(value, today=None):
+    """Дата для просмотра расписания: 15.10, вчера, через 3 дня, пн, 2026-10-15.
+
+    В отличие от срока ДЗ день недели означает «ближайший такой день, включая
+    сегодня»: студент, который в понедельник пишет «пн», хочет видеть понедельник.
+    """
+    today = today or date.today()
+    raw = (value or "").strip().lower().replace("ё", "е")
+    if not raw:
+        return None
+    if raw in ("вчера", "вчерашний день", "yesterday"):
+        return today - timedelta(days=1)
+    if raw in ("позавчера",):
+        return today - timedelta(days=2)
+    if raw in WEEKDAY_NAMES:
+        target = WEEKDAY_NAMES[raw]
+        return today + timedelta(days=(target - today.weekday()) % 7)
+    return parse_due_date(raw, today)
+
+
 def parse_due_date(value, today=None):
     """Дата сдачи: 08.10, 8.10.2026, 2026-10-08, завтра, пн, через 3 дня."""
     today = today or date.today()
@@ -2030,6 +2159,8 @@ def parse_due_date(value, today=None):
         return today + timedelta(days=1)
     if raw in ("послезавтра",):
         return today + timedelta(days=2)
+    if raw in ("через неделю", "через 1 неделю"):
+        return today + timedelta(weeks=1)
     match = re.search(r"через\s+(\d+)\s*(день|дня|дней|недел\w*)", raw)
     if match:
         amount = int(match.group(1))

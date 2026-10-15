@@ -34,6 +34,25 @@ def warn(message):
     print("   ⚠️ %s" % message)
 
 
+def callbacks(tg, chat):
+    """callback_data кнопок из последнего сообщения бота."""
+    items = tg.out(chat)
+    if not items:
+        return []
+    return [button.get("callback_data")
+            for row in (items[-1].get("keyboard") or {}).get("inline_keyboard", [])
+            for button in row]
+
+
+def click(bot, chat, data):
+    """Нажимает inline-кнопку так же, как это делает Telegram."""
+    bot.handle_callback({"id": "cb-%s" % data,
+                         "from": {"id": chat, "username": "student",
+                                  "first_name": "Студент"},
+                         "message": {"message_id": 1, "chat": {"id": chat}},
+                         "data": data})
+
+
 def show(title, reply):
     print("\n" + "-" * 66)
     print("→ %s" % title)
@@ -88,17 +107,34 @@ def main():
 
     for title, command in (("📅 Сегодня", texts.BTN_TODAY),
                            ("📅 Завтра", texts.BTN_TOMORROW),
-                           ("🗓 Неделя", texts.BTN_WEEK)):
+                           ("🗓 Неделя", texts.BTN_WEEK),
+                           ("🗓 След. неделя", texts.BTN_NEXT_WEEK),
+                           ("🔎 Другой день: запрос даты", texts.BTN_DAY),
+                           ("🔎 Другой день: через 3 дня", "через 3 дня"),
+                           ("🔎 Другой день: вчера", "вчера"),
+                           ("🔎 Другой день: 15.10", "15.10"),
+                           ("🔎 Другой день: пн", "пн"),
+                           ("🔎 Другой день: непонятная дата", "абракадабра")):
         reply = send(command)
         show(title, reply)
+        if title.startswith("🔎 Другой день: непонятная"):
+            continue                      # это проверка подсказки, а не расписания
         day_text = plain(reply)
         slots = re.findall(r"(\d)\s*пара\s*·\s*([\d:–-]+)", day_text)
         if slots and len(slots) != len(set(slots)):
             warn("в «%s» повторяются пары" % title)
-        duplicates = re.findall(r"(?:✏️|📖|🔬|📘)\s*([^\n]+)", day_text)
-        repeated = [item for item in set(duplicates) if duplicates.count(item) > 1]
-        if repeated:
-            warn("в «%s» дублируются предметы: %s" % (title, repeated[:3]))
+        # Дубли ищем по каждому дню отдельно: в недельном списке один и тот же
+        # предмет в разные дни — это нормально.
+        blocks = [day_text]
+        if "Неделя" in title:
+            blocks = re.split(r"(?=Понедельник|Вторник|Среда|Четверг|Пятница|Суббота)",
+                              day_text)
+        for block in blocks:
+            subjects = re.findall(r"(?:✏️|📖|🔬|📘)\s*([^\n]+)", block)
+            repeated = [item for item in set(subjects) if subjects.count(item) > 1]
+            if repeated:
+                warn("в «%s» дублируются предметы в одном дне: %s" % (title, repeated[:3]))
+                break
 
     for title, command in (("📝 ДЗ", texts.BTN_HOMEWORK),
                            ("⏰ Напоминания", texts.BTN_REMINDERS),
@@ -108,8 +144,16 @@ def main():
                            ("/whoami", "/whoami")):
         show(title, send(command))
 
-    # Домашка: добавление, список, срок
-    show("ДЗ: добавить", send("📝 ДЗ"))
+    # Домашка: добавление через кнопку, список, срок
+    show("ДЗ: экран", send(texts.BTN_HOMEWORK))
+    for data in callbacks(tg, chat):
+        if str(data).startswith("hw:new"):
+            click(bot, chat, data)
+            break
+    for data in callbacks(tg, chat):
+        if str(data) in ("hw:new:personal", "hw:new:group"):
+            click(bot, chat, data)
+            break
     show("ДЗ: ввод задания", send("Анатомия | выучить череп | завтра"))
     show("ДЗ: список", send(texts.BTN_HOMEWORK))
     homework = bot.store.query("SELECT * FROM homework")

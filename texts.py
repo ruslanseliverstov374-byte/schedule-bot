@@ -14,7 +14,9 @@ from schedule.unifirst import day_label, week_label
 
 BTN_TODAY = "📅 Сегодня"
 BTN_TOMORROW = "📅 Завтра"
+BTN_DAY = "🔎 Другой день"
 BTN_WEEK = "🗓 Неделя"
+BTN_NEXT_WEEK = "🗓 След. неделя"
 BTN_HOMEWORK = "📝 ДЗ"
 BTN_REMINDERS = "⏰ Напоминания"
 BTN_REFRESH = "🔄 Обновить"
@@ -23,7 +25,8 @@ BTN_HELP = "ℹ️ Помощь"
 
 MAIN_BUTTONS = [
     [BTN_TODAY, BTN_TOMORROW],
-    [BTN_WEEK, BTN_HOMEWORK],
+    [BTN_DAY, BTN_WEEK],
+    [BTN_NEXT_WEEK, BTN_HOMEWORK],
     [BTN_REMINDERS, BTN_REFRESH],
     [BTN_SETTINGS, BTN_HELP],
 ]
@@ -231,16 +234,30 @@ def slot_compact(block):
     return "   <b>%s</b> ✏️ %s · %s" % (para, subject, " · ".join(bits))
 
 
-def day_schedule(day, lessons, group_title, label=None):
+def day_schedule(day, lessons, group_title, label=None, note=""):
     """Подробное расписание одного дня (с учётом деления на подгруппы)."""
     title = label or day_label(day)
     header = "📅 <b>%s</b>\n" % esc(title)
     if group_title:
         header += "Группа <b>%s</b>\n" % esc(group_title)
+    if note:
+        header += "<i>%s</i>\n" % esc(note)
     if not lessons:
         return header + "\n🎉 Занятий нет — отдыхай!"
     blocks = unifirst.group_by_slot(lessons)
     return header + "\n" + "\n\n".join(slot_block(block) for block in blocks)
+
+
+def ask_day(example="15.10"):
+    """Подсказка: на какую дату показать расписание."""
+    return ("🔎 <b>На какой день показать расписание?</b>\n\n"
+            "Напиши дату или словами:\n"
+            "• <code>%s</code> — число и месяц\n"
+            "• <code>вчера</code>, <code>сегодня</code>, <code>завтра</code>\n"
+            "• <code>через 3 дня</code>\n"
+            "• <code>пн</code>, <code>ср</code>, <code>пт</code> — ближайший такой день\n\n"
+            "<i>Прошедшие даты тоже можно: расписание хранится за весь семестр.</i>"
+            % esc(example))
 
 
 def day_compact(day, lessons):
@@ -546,6 +563,11 @@ def help_text(user=None, is_admin=False):
         "<b>Расписание</b>\n"
         "📅 Сегодня · 📅 Завтра · 🗓 Неделя — пары с временем, аудиторией и "
         "преподавателем. Листай недели кнопками ← →.\n"
+        "🔎 <b>Другой день</b> — расписание на любую дату: <code>15.10</code>, "
+        "<code>вчера</code>, <code>через 3 дня</code>, <code>пн</code>. "
+        "Работает и для прошедших дней, и для будущих; листать можно кнопками "
+        "«⬅️ Предыдущий» и «Следующий ➡️».\n"
+        "🗓 <b>След. неделя</b> — сразу следующая неделя, без листания.\n"
         "🔄 Обновить — зайти на сайт расписания прямо сейчас и проверить, "
         "не поменялось ли.\n\n"
         "<b>ДЗ</b>\n"
@@ -557,7 +579,9 @@ def help_text(user=None, is_admin=False):
         "сообщения об изменениях расписания и дедлайнах.\n\n"
         "<b>Команды</b>\n"
         "/start — выбрать группу заново\n"
-        "/today, /tomorrow, /week — расписание\n"
+        "/today, /tomorrow — расписание на день\n"
+        "/day 15.10 — расписание на любую дату\n"
+        "/week, /nextweek — текущая и следующая неделя\n"
         "/hw — домашние задания\n"
         "/refresh — проверить актуальность\n"
         "/settings — настройки\n"

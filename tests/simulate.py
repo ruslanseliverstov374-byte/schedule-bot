@@ -237,6 +237,87 @@ def main():
         check("неделя: есть заголовок недели", "Неделя с" in text, text[:200])
         check("неделя: встречается предмет", subject_today in text)
 
+        print("\n2b. Расписание на произвольный день и следующая неделя")
+        tg.clear()
+        send_text(bot, 100, texts.BTN_NEXT_WEEK)
+        text = tg.last_text(100)
+        next_year, next_week = unifirst.shift_week(year, week, 1)
+        check("след. неделя: заголовок нужной недели",
+              unifirst.week_label(next_year, next_week) in text, text[:200])
+        check("след. неделя: расписание не пустое",
+              "занятий нет" not in text.lower() or len(text) > 120, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, texts.BTN_DAY)
+        text = tg.last_text(100)
+        check("другой день: бот спросил дату", "На какой день" in text, text[:160])
+        check("другой день: показаны примеры ввода",
+              "15.10" in text or "вчера" in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "через 3 дня")
+        text = tg.last_text(100)
+        target_day = today + timedelta(days=3)
+        check("другой день: показан запрошенный день",
+              target_day.strftime("%d") in text or "Занятий нет" in text, text[:200])
+        day_buttons = [button.get("callback_data") for item in tg.out(100)
+                       for row in ((item.get("keyboard") or {}).get("inline_keyboard") or [])
+                       for button in row]
+        check("другой день: есть кнопка «предыдущий»",
+              any(str(data).startswith("d:") for data in day_buttons), day_buttons)
+        check("другой день: есть кнопка «следующий»", len(
+            [data for data in day_buttons if str(data).startswith("d:")]) >= 2, day_buttons)
+
+        tg.clear()
+        send_text(bot, 100, "вчера")
+        text = tg.last_text(100)
+        check("другой день: дату можно написать без кнопки (вчера)",
+              "Вчера" in text or "Занятий нет" in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "10.10")
+        text = tg.last_text(100)
+        check("другой день: прошедшее число показывает пометку",
+              "Прошедший день" in text or "Занятий нет" in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, texts.BTN_DAY)
+        send_text(bot, 100, "абракадабра")
+        text = tg.last_text(100)
+        check("другой день: непонятная дата объясняется",
+              "Не понял дату" in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "пн")
+        text = tg.last_text(100)
+        check("другой день: день недели показывает ближайший понедельник",
+              "Понедельник" in text or "Занятий нет" in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "/day 15.10")
+        text = tg.last_text(100)
+        check("команда /day с датой работает", "Группа" in text or "Занятий нет" in text,
+              text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "/nextweek")
+        text = tg.last_text(100)
+        check("команда /nextweek работает",
+              unifirst.week_label(next_year, next_week) in text, text[:200])
+
+        tg.clear()
+        send_text(bot, 100, "следующая неделя")
+        text = tg.last_text(100)
+        check("слова «следующая неделя» тоже работают",
+              unifirst.week_label(next_year, next_week) in text, text[:200])
+        check("в меню есть кнопки «Другой день» и «След. неделя»",
+              texts.BTN_DAY in "".join(texts.MAIN_BUTTONS[i][j]
+                                       for i in range(len(texts.MAIN_BUTTONS))
+                                       for j in range(len(texts.MAIN_BUTTONS[i]))) and
+              texts.BTN_NEXT_WEEK in "".join(texts.MAIN_BUTTONS[i][j]
+                                             for i in range(len(texts.MAIN_BUTTONS))
+                                             for j in range(len(texts.MAIN_BUTTONS[i]))), None)
+
         print("\n3. Поиск группы с опечаткой (262801)")
         tg.clear()
         bot.store.ensure_user(200, "student2", "Второй")
