@@ -153,6 +153,7 @@ def main():
     bot = ScheduleBot("test-token", db_path=db_path, logger=lambda message: None,
                       telegram=tg, provider=FakeProvider())
     bot.me = {"id": 1}
+    bot.owner_id = 100        # владелец: у него права админа должны быть всегда
     store = bot.store
     admin, student, inactive = 100, 200, 300
 
@@ -162,6 +163,17 @@ def main():
         check("первый пользователь стал админом", bool(store.get_user(admin)["is_admin"]))
         send_text(bot, student, "/start", "Софа")
         check("второй пользователь не админ", not store.get_user(student)["is_admin"])
+        # Владелец (OWNER_ID) должен быть админом всегда — даже если флаг потерялся
+        # при восстановлении базы из копии (так и случилось 14 октября).
+        store.update_user(admin, is_admin=0)
+        check("флаг админа снят принудительно", not store.get_user(admin)["is_admin"])
+        send_text(bot, admin, "/whoami", "Руслан")
+        check("владельцу права вернулись автоматически",
+              bool(store.get_user(admin)["is_admin"]), store.get_user(admin)["is_admin"])
+        tg.clear()
+        send_text(bot, admin, "/admin")
+        check("владелец снова видит админ-панель", "Админ-панель" in tg.last_text(admin),
+              tg.last_text(admin)[:60])
         tg.clear()
         send_text(bot, student, "/admin")
         check("постороннему админ-панель закрыта", "админа" in tg.last_text(student).lower(),
@@ -359,7 +371,28 @@ def main():
                                  for row in bot.main_keyboard(store.get_user(student))
                                  .get("keyboard", []) for button in row], None)
 
-        print("\n8. Личное сообщение конкретному студенту")
+        print("\n8. Короткий список групп не затирает полный")
+        store.save_groups([{"name": "26%03d" % index} for index in range(1, 31)])
+        baseline = store.groups_count()
+        check("группы сохранены", baseline >= 30, baseline)
+        logs = []
+        bot.log = logs.append
+        bot.provider.groups = lambda: [{"name": "27%03d" % index}
+                                       for index in range(1, 11)]
+        bot.refresh_groups_cache(force=True)
+        check("короткий список (10 из %d) не применили" % baseline,
+              any("подозрительно короткий" in item for item in logs), logs[-1:])
+        check("группа из прежнего списка не пропала",
+              bool(store.group_by_name("26030")), store.group_by_name("26030"))
+        check("короткий список не попал в базу", store.group_by_name("27001") is None)
+        bot.provider.groups = lambda: [{"name": "27%03d" % index}
+                                       for index in range(1, baseline - 1)]
+        bot.refresh_groups_cache(force=True)
+        check("нормальный список применился",
+              any("Список групп обновлён" in item for item in logs), logs[-1:])
+        check("группы из нового списка появились", bool(store.group_by_name("27002")))
+
+        print("\n9. Личное сообщение конкретному студенту")
         tg.clear()
         send_text(bot, admin, "/broadcast")
         buttons = [button.get("callback_data")

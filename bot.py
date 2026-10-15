@@ -304,6 +304,16 @@ class ScheduleBot:
             self.log("Неожиданная ошибка при обновлении списка групп: %s" % error)
             return self.store.groups_count()
         if groups:
+            existing = self.store.groups_count()
+            # Сайт расписания периодически отдаёт неполный список (наблюдали
+            # 239 -> 82 -> 90 -> 239 за один день). Если заменить полный список
+            # коротким, часть студентов не найдёт свою группу, поэтому короткий
+            # список игнорируем и ждём следующего обновления.
+            if existing >= 20 and len(groups) < existing * 0.8:
+                self.log("Список групп подозрительно короткий: %d вместо %d — "
+                         "оставляю прежний (сайт, похоже, обновляется)"
+                         % (len(groups), existing))
+                return existing
             self.store.save_groups(groups)
             self.log("Список групп обновлён: %d" % len(groups))
         return self.store.groups_count()
@@ -370,6 +380,21 @@ class ScheduleBot:
         bot_id = (self.me or {}).get("id")
         return bool(bot_id) and (sender or {}).get("id") == bot_id
 
+    def ensure_admin_rights(self, user):
+        """Владелец бота (OWNER_ID) — всегда админ.
+
+        Раньше админом становился просто первый пользователь базы. После
+        восстановления базы из копии флаг мог потеряться — и владелец видел
+        «Команда только для админа». Теперь права возвращаются автоматически
+        при первом же сообщении.
+        """
+        if not user or user.get("is_admin"):
+            return user
+        if self.owner_id and user.get("tg_id") == self.owner_id:
+            self.log("Возвращаю права админа владельцу %s" % user["tg_id"])
+            return self.store.update_user(user["tg_id"], is_admin=1)
+        return user
+
     def handle_message(self, message):
         chat_id = message["chat"]["id"]
         text = (message.get("text") or "").strip()
@@ -381,6 +406,7 @@ class ScheduleBot:
             return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        user = self.ensure_admin_rights(user)
         self._current_user = user
         self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         if not text:
@@ -698,6 +724,7 @@ class ScheduleBot:
         команда зависала на минуты и (в общем сервисе) блокировала второго бота.
         Живая проверка осталась отдельной кнопкой «🔄 Обновить группы».
         """
+        user = self.ensure_admin_rights(user) or {}
         if not user.get("is_admin"):
             self.tg.send_message(chat_id, "Команда только для админа бота.")
             return
@@ -724,6 +751,9 @@ class ScheduleBot:
     # ------------------------------------------------ данные и рассылки (админ)
 
     def require_admin(self, chat_id, user):
+        # Владелец получает права автоматически — на случай, если база
+        # восстановилась из копии без этого флага.
+        user = self.ensure_admin_rights(user) or {}
         if not user.get("is_admin"):
             self.tg.send_message(chat_id, "Команда только для админа бота.")
             return False
@@ -1480,6 +1510,7 @@ class ScheduleBot:
             return
         user = self.store.ensure_user(chat_id, sender.get("username", ""),
                                       sender.get("first_name", ""))
+        user = self.ensure_admin_rights(user)
         self._current_user = user
         self.store.touch_user(chat_id)      # статистика: активность и число сообщений
         self.tg.answer_callback(callback["id"])
@@ -1972,6 +2003,7 @@ def _parse_iso(value):
 def run_checks(db_path=DEFAULT_DB, logger=print):
     """Самопроверка без Telegram: API, база, парсинг дат."""
     problems = []
+    warnings = []
     logger("1. Проверяю API расписания...")
     api = unifirst.Unifirst()
     try:
@@ -1981,7 +2013,9 @@ def run_checks(db_path=DEFAULT_DB, logger=print):
         problems.append("API недоступен: %s" % error)
     logger("   групп получено: %d" % len(groups))
     if groups and len(groups) < 50:
-        problems.append("подозрительно мало групп: %d" % len(groups))
+        # Сайт иногда отдаёт неполный список (наблюдали 82 и 90 при полных 239):
+        # это не поломка бота, но знать об этом полезно.
+        warnings.append("сайт отдал мало групп: %d — возможно, он обновляется" % len(groups))
 
     lessons = []
     if groups:
@@ -2034,6 +2068,10 @@ def run_checks(db_path=DEFAULT_DB, logger=print):
             problems.append("разбор ДЗ: %s = %r, ожидалось %r" % (key, parsed.get(key), value))
     logger("   «%s» -> %s" % (parsed["subject"], parsed["task"]))
 
+    if warnings:
+        logger("\n⚠️ Замечания (на работу не влияют):")
+        for warning in warnings:
+            logger("   - %s" % warning)
     if problems:
         logger("\n❌ Найдены проблемы:")
         for problem in problems:
