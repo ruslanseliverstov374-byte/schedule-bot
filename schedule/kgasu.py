@@ -217,12 +217,18 @@ def find_group(groups_list, query):
 
 # ------------------------------------------------------------------ таблица
 
-def grid_from_bytes(blob, file_name=""):
+def grid_from_bytes(blob, file_name="", progress=None):
     """Таблица расписания: {'header': [...], 'columns': [...], 'rows': [[...], ...]}.
 
     columns — описание столбцов занятий: [{'group': '26РП01', 'subgroup': 'Подгруппа 1'}].
-    Для .docx берётся готовая таблица Word, для .doc строки собираются по времени.
+    Форматов три:
+      * .docx — готовая таблица Word;
+      * .doc — старый бинарный Word (строки собираются по времени);
+      * .pdf — с октября 2026 КГАСУ выкладывает расписания сканами: страницы
+        распознаются OCR (tesseract) и собираются в ту же таблицу.
     """
+    if blob[:4] == b"%PDF" or file_name.lower().endswith(".pdf"):
+        return _grid_from_pdf(blob, file_name, progress)
     if blob[:2] == b"PK" or file_name.lower().endswith(".docx"):
         tables = docxparse.docx_tables(blob)
         table = _pick_schedule_table(tables)
@@ -240,6 +246,23 @@ def grid_from_bytes(blob, file_name=""):
         raise KgasuError("в файле %s не удалось собрать строки расписания" % file_name)
     return {"header": [], "columns": columns, "rows": rows, "kind": "doc",
             "text": text, "row_width": row_width}
+
+
+def _grid_from_pdf(blob, file_name="", progress=None):
+    """Разбор PDF-скана: картинки → OCR → та же таблица, что и для Word."""
+    from schedule import pdfparse      # импорт внутри: модуль нужен только здесь
+
+    log = progress or (lambda message: None)
+    try:
+        grid = pdfparse.table_from_pdf(blob, group_hint="", progress=log)
+    except pdfparse.PdfError as error:
+        raise KgasuError("не удалось прочитать PDF %s: %s" % (file_name, error))
+    if not grid.get("rows"):
+        raise KgasuError(
+            "PDF %s — скан, из которого не удалось собрать таблицу "
+            "(возможно, нет OCR или плохое качество скана)" % file_name)
+    grid["kind"] = "pdf"
+    return grid
 
 
 MONTH_NAMES = {
@@ -665,8 +688,12 @@ def parse_cell(text):
 # ------------------------------------------------------------ пары на день
 
 def lessons_for_day(grid, group, day, subgroup=""):
-    """Пары группы на конкретную дату (с учётом «Чет/Неч» и пометок «с даты»)."""
-    if grid.get("kind") not in ("docx", "doc"):
+    """Пары группы на конкретную дату (с учётом «Чет/Неч» и пометок «с даты»).
+
+    Работает для всех трёх форматов источника: .docx, .doc и PDF-скан (pdf),
+    потому что разбор отдаёт одинаковую таблицу.
+    """
+    if grid.get("kind") not in ("docx", "doc", "pdf"):
         raise KgasuError("разбор этого файла пока не поддержан (%s)"
                          % grid.get("kind"))
     weekday = WEEKDAYS[day.weekday()]
@@ -772,12 +799,18 @@ def _as_int(value):
         return None
 
 
-def prepare(blob, file_name="", header_text=""):
-    """Готовит таблицу к работе: добавляет столбцы, опорную неделю и текст шапки."""
-    grid = grid_from_bytes(blob, file_name)
+def prepare(blob, file_name="", header_text="", progress=None):
+    """Готовит таблицу к работе: добавляет столбцы, опорную неделю и текст шапки.
+
+    ``progress`` — необязательная функция для лога: разбор PDF-скана распознаётся
+    OCR и занимает секунды, поэтому полезно видеть, на каком он шаге.
+    """
+    grid = grid_from_bytes(blob, file_name, progress=progress)
     if grid.get("kind") == "docx":
         text = header_text or docxparse.docx_text(blob)
     else:
+        # Для PDF-скана текст шапки (например «с 01.09.2026 (16 недель)») отдаёт
+        # распознавание: по нему определяется, какая неделя «Чет», а какая «Неч».
         text = grid.get("text") or ""
     grid["header_text"] = text[:2000]
     grid["anchor"] = resolve_anchor(grid.get("rows") or [], text)

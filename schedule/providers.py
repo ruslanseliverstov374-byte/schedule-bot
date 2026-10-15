@@ -14,6 +14,8 @@
 """
 
 import hashlib
+import json
+import os
 
 from schedule import kgasu, unifirst
 
@@ -66,11 +68,19 @@ class KgasuProvider:
     city = "Казань"
     site = "https://www.kgasu.ru/student/raspisanie-zanyatiy/index.php"
 
-    def __init__(self, store=None, cache_minutes=180, groups_cache=None):
+    def __init__(self, store=None, cache_minutes=180, groups_cache=None, logger=None):
         self.store = store
         self.cache_minutes = cache_minutes
         self._grids = {}          # ссылка на файл -> разобранная таблица (в памяти)
         self._groups = groups_cache
+        self.log = logger if callable(logger) else (lambda message: None)
+
+    def _progress(self, message):
+        """Пишет ход разбора в лог бота (видно, когда распознаётся PDF-скан)."""
+        try:
+            self.log("КГАСУ: %s" % message)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------- группы
 
@@ -116,14 +126,54 @@ class KgasuProvider:
         try:
             blob, path = kgasu.download(file_url,
                                         max_age_minutes=0 if force else self.cache_minutes)
-            grid = kgasu.prepare(blob, file_url.split("/")[-1])
+            file_hash = hashlib.sha1(blob).hexdigest()[:16]
+            # Разбор PDF-скана занимает десятки секунд (OCR), поэтому результат
+            # кладём на диск: после перезапуска сервиса расписание берётся готовым.
+            if not force:
+                cached = self._load_grid_cache(file_url, file_hash)
+                if cached is not None:
+                    self._grids[file_url] = cached
+                    return cached
+            grid = kgasu.prepare(blob, file_url.split("/")[-1], progress=self._progress)
         except kgasu.KgasuError as error:
             raise ProviderError(str(error))
-        grid["file_hash"] = hashlib.sha1(blob).hexdigest()[:16]
+        grid["file_hash"] = file_hash
         grid["file_url"] = file_url
         if not force:
             self._grids[file_url] = grid
+            self._save_grid_cache(file_url, file_hash, grid)
         return grid
+
+    # ------------------------------------------------- кэш разбора на диске
+
+    def _grid_cache_path(self, file_url, file_hash):
+        digest = hashlib.sha1(file_url.encode("utf-8")).hexdigest()[:12]
+        return os.path.join(kgasu.CACHE_DIR, "grid-%s-%s.json" % (digest, file_hash))
+
+    def _load_grid_cache(self, file_url, file_hash):
+        """Разобранная таблица с диска: только если файл не менялся (тот же хеш)."""
+        path = self._grid_cache_path(file_url, file_hash)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                grid = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        if not grid.get("rows"):
+            return None
+        grid["file_url"] = file_url
+        grid["file_hash"] = file_hash
+        return grid
+
+    def _save_grid_cache(self, file_url, file_hash, grid):
+        path = self._grid_cache_path(file_url, file_hash)
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(grid, handle, ensure_ascii=False)
+        except OSError:
+            pass
 
     def week_lessons(self, group, year, week, force=False):
         """Пары группы на неделю: перебираем семь дней недели."""

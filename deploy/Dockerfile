@@ -12,6 +12,13 @@
 
 FROM python:3.12-slim
 
+# Расписания КГАСУ с октября 2026 выкладывают сканами в PDF: чтобы читать их,
+# в образ ставится OCR с русским языком (~40 МБ). Если его нет, бот честно
+# скажет, что файл — скан, и не сломается.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-rus \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY . /app/
@@ -21,6 +28,8 @@ RUN rm -rf /app/data /app/logs /app/token.txt /app/token-kgasu.txt /app/.env \
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV REFRESH_MINUTES=20
+#: Подсказка tesseract: сканы КГАСУ — 300 dpi.
+ENV TESSERACT_DPI=300
 
 VOLUME ["/app/data"]
 

@@ -163,7 +163,7 @@ class ScheduleBot:
             self.provider = provider
         elif (university or env_value("UNIVERSITY", "unifirst")).strip().lower() in (
                 "kgasu", "кгасу"):
-            self.provider = providers.KgasuProvider(store=self.store)
+            self.provider = providers.KgasuProvider(store=self.store, logger=self.log)
         else:
             self.provider = providers.UnifirstProvider(self.api)
         self.engine = ReminderEngine(self.store, self.api, self.tg, logger=logger,

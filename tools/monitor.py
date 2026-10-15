@@ -242,8 +242,12 @@ def check_schedule(owner_id):
                 except Exception as failure:
                     count, error = 0, str(failure)[:120]
                 if error:
-                    problem("%s / %s: расписание не получено (%s)"
-                            % (bot["title"], group, error))
+                    if "OCR" in error or "скан" in error.lower():
+                        note("%s / %s: файл выложен сканом — нужен OCR "
+                             "(в облаке он установлен)" % (bot["title"], group))
+                    else:
+                        problem("%s / %s: расписание не получено (%s)"
+                                % (bot["title"], group, error))
                 elif count:
                     note("%s / %s на %s: %d пар" % (bot["title"], group,
                                                     day.strftime("%d.%m"), count))
