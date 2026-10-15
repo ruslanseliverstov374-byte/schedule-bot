@@ -66,6 +66,25 @@ def inspect(path):
             "people": connection.execute(
                 "SELECT tg_id, first_name, group_title FROM users LIMIT 8").fetchall(),
         }
+        # Кэш расписания: видно, разобрал ли бот файлы источника (например, скан PDF).
+        try:
+            weeks = connection.execute(
+                "SELECT group_title, year, week, fetched_at, lessons FROM timetable"
+                " ORDER BY fetched_at DESC LIMIT 6").fetchall()
+            result["weeks"] = []
+            for group, year, week, fetched_at, lessons in weeks:
+                try:
+                    parsed = json.loads(lessons or "[]")
+                except ValueError:
+                    parsed = []
+                dates = sorted({item.get("date") for item in parsed if item.get("date")})
+                result["weeks"].append({
+                    "group": group, "year": year, "week": week,
+                    "fetched_at": fetched_at, "lessons": len(parsed),
+                    "dates": dates[:3],
+                })
+        except sqlite3.Error:
+            result["weeks"] = []
     finally:
         connection.close()
     return result
@@ -112,6 +131,16 @@ def main():
                   % (data["users"], data["groups"], data["homework"]))
             for row in data["people"]:
                 print("      id=%s имя=%s группа=%s" % row)
+            weeks = data.get("weeks") or []
+            if weeks:
+                print("   КЭШ РАСПИСАНИЯ (проверка, что источник разбирается):")
+                for item in weeks:
+                    print("      %s: неделя %s/%s, пар %d, даты %s (получено %s)"
+                          % (item["group"], item["year"], item["week"], item["lessons"],
+                             ", ".join(item["dates"]) or "—",
+                             str(item["fetched_at"])[:16]))
+            else:
+                print("   КЭШ РАСПИСАНИЯ пуст — бот ещё не запрашивал расписание")
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

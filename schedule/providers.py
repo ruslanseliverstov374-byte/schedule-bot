@@ -167,13 +167,18 @@ class KgasuProvider:
         return grid
 
     def _save_grid_cache(self, file_url, file_hash, grid):
+        """Кладёт разобранную таблицу на диск.
+
+        Ошибки кэша не должны ломать запрос расписания: если таблица почему-то
+        не сериализуется, просто работаем без кэша.
+        """
         path = self._grid_cache_path(file_url, file_hash)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump(grid, handle, ensure_ascii=False)
-        except OSError:
-            pass
+                json.dump(grid, handle, ensure_ascii=False, default=str)
+        except Exception as error:
+            self._progress("кэш разбора не сохранился: %s" % error)
 
     def week_lessons(self, group, year, week, force=False):
         """Пары группы на неделю: перебираем семь дней недели."""
@@ -182,9 +187,11 @@ class KgasuProvider:
         for day in unifirst.week_days(year, week):
             lessons.extend(kgasu.lessons_for_day(grid, group, day))
         lessons.sort(key=lambda item: (item["date"], item["para"] or 0, item["start"]))
+        # Слепок и кэш пишутся в JSON, поэтому приводим значения к простым типам.
+        lessons = [_json_safe(lesson) for lesson in lessons]
         payload = {"kind": grid.get("kind"), "file_url": grid.get("file_url"),
                    "file_hash": grid.get("file_hash"),
-                   "columns": grid.get("columns") or []}
+                   "columns": _json_safe(grid.get("columns") or [])}
         return lessons, payload
 
     def groups_in_file(self, group):
@@ -249,6 +256,21 @@ def filter_by_subgroup(lessons, subgroup):
             lessons, _ = self.week_lessons(sample["name"], year, week)
             result["lessons"] = len(lessons)
         return result
+
+
+def _json_safe(value):
+    """Приводит значение к тому, что переживёт JSON (даты — в строки).
+
+    Слепки расписания и кэш разбора сохраняются в JSON, поэтому дата внутри
+    пары раньше ломала запись («Object of type date is not JSON serializable»).
+    """
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def make_provider(name, store=None):

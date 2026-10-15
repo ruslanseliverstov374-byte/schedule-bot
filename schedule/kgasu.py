@@ -553,13 +553,30 @@ def calibrate_parity(rows):
 
 
 def parity_of(day, anchor_monday=None, anchor_label="неч"):
-    """Какая неделя (Чет/Неч) у даты — по опорной неделе и чередованию."""
+    """Какая неделя (Чет/Неч) у даты — по опорной неделе и чередованию.
+
+    Опорная неделя может быть датой или строкой «ГГГГ-ММ-ДД»: таблица разбора
+    кэшируется в JSON, а объекты date в JSON не сохраняются.
+    """
+    if isinstance(anchor_monday, str):
+        anchor_monday = _parse_iso_date(anchor_monday)
     if anchor_monday is None:
         return "Неч"
     weeks = (monday_of(day) - anchor_monday).days // 7
     even = (weeks % 2 == 0)
     is_chet = (anchor_label == "чет") == even
     return "Чет" if is_chet else "Неч"
+
+
+def _parse_iso_date(value):
+    """«2026-08-31» -> date(2026, 8, 31); пустая строка и мусор -> None."""
+    text = str(value or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date(int(text[0:4]), int(text[5:7]), int(text[8:10]))
+    except (TypeError, ValueError):
+        return None
 
 
 def resolve_anchor(rows, header_text=""):
@@ -697,7 +714,10 @@ def lessons_for_day(grid, group, day, subgroup=""):
         raise KgasuError("разбор этого файла пока не поддержан (%s)"
                          % grid.get("kind"))
     weekday = WEEKDAYS[day.weekday()]
-    anchor_monday, anchor_label = grid.get("anchor") or (None, "неч")
+    anchor = grid.get("anchor") or ["", "неч"]
+    anchor_monday = anchor[0] if isinstance(anchor, (list, tuple)) else anchor
+    anchor_label = anchor[1] if isinstance(anchor, (list, tuple)) and len(anchor) > 1 \
+        else "неч"
     weekday_parity = parity_of(day, anchor_monday, anchor_label)
 
     columns = [column for column in grid.get("columns") or []
@@ -813,5 +833,8 @@ def prepare(blob, file_name="", header_text="", progress=None):
         # распознавание: по нему определяется, какая неделя «Чет», а какая «Неч».
         text = grid.get("text") or ""
     grid["header_text"] = text[:2000]
-    grid["anchor"] = resolve_anchor(grid.get("rows") or [], text)
+    # Опорную неделю храним строкой: таблица кэшируется в JSON (диск и база),
+    # а объекты date туда не помещаются.
+    anchor_monday, anchor_label = resolve_anchor(grid.get("rows") or [], text)
+    grid["anchor"] = [anchor_monday.isoformat() if anchor_monday else "", anchor_label]
     return grid

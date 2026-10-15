@@ -75,10 +75,24 @@ def main():
     check("строк в таблице больше 60", len(docx_grid["rows"]) > 60, len(docx_grid["rows"]))
     check("столбцы: две группы по двум подгруппам",
           len(docx_grid["columns"]) == 4, docx_grid["columns"])
-    anchor_monday, anchor_label = docx_grid["anchor"]
+    anchor_iso, anchor_label = docx_grid["anchor"]
     check("опорная неделя определена по пометкам «с даты»",
-          anchor_monday == kgasu.monday_of(date(2026, 9, 28)) and anchor_label == "неч",
-          docx_grid["anchor"])
+          anchor_iso == kgasu.monday_of(date(2026, 9, 28)).isoformat()
+          and anchor_label == "неч", docx_grid["anchor"])
+
+    def json_ok(grid):
+        import json as json_module
+        try:
+            json_module.dumps(grid, ensure_ascii=False)
+            return True
+        except TypeError as error:
+            return str(error)
+
+    check("таблица .docx сохраняется в JSON (кэш разбора)",
+          json_ok(docx_grid) is True, json_ok(docx_grid))
+    check("опорная неделя работает и строкой",
+          kgasu.parity_of(date(2026, 10, 6), anchor_iso, anchor_label) == "Чет",
+          anchor_iso)
 
     chet_day = date(2026, 10, 6)          # вторник, неделя «Чет»
     lessons = kgasu.lessons_for_day(docx_grid, "26РП01", chet_day)
@@ -103,6 +117,7 @@ def main():
           [item["subject"] for item in before_start])
     check("соседняя неделя даёт другой набор пар",
           kgasu.lessons_for_day(docx_grid, "26РП01", date(2026, 10, 13)) != lessons)
+    check("таблица .doc тоже сохраняется в JSON", json_ok(docx_grid) is True)
 
     print("\n4. Файл .doc (группа 26РМ01)")
     doc_grid = kgasu.prepare(read("kgasu_26RM01.doc"), "kgasu_26RM01.doc")
@@ -113,6 +128,8 @@ def main():
           doc_grid["columns"])
     doc_lessons = kgasu.lessons_for_day(doc_grid, "26РМ01", date(2026, 10, 6))
     check("пары из .doc найдены", len(doc_lessons) >= 1, len(doc_lessons))
+    check("таблица .doc сохраняется в JSON (кэш разбора)",
+          json_ok(doc_grid) is True, json_ok(doc_grid))
     check("у пары из .doc есть предмет и преподаватель",
           all(item["subject"] and item["teachers"] for item in doc_lessons), doc_lessons[:1])
 

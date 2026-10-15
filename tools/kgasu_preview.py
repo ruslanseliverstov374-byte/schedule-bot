@@ -46,10 +46,11 @@ def main():
     print("   столбцы занятий: %s" % ", ".join(
         "%s/%s" % (column["group"], column["subgroup"] or "—")
         for column in (grid.get("columns") or [])[:8]))
-    anchor_monday, anchor_label = grid.get("anchor") or (None, "")
-    print("   опорная неделя: %s -> %s"
-          % (anchor_monday.strftime("%d.%m.%Y") if anchor_monday else "не определена",
-             anchor_label))
+    anchor = grid.get("anchor") or ["", ""]
+    anchor_iso = anchor[0] if isinstance(anchor, (list, tuple)) else str(anchor)
+    anchor_label = anchor[1] if isinstance(anchor, (list, tuple)) and len(anchor) > 1 \
+        else "неч"
+    print("   опорная неделя: %s -> %s" % (anchor_iso or "не определена", anchor_label))
     print("   строк в таблице: %d" % len(grid.get("rows") or []))
 
     print("\n3. Пары на ближайшие дни:")
