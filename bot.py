@@ -16,10 +16,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import traceback
 import urllib.error
+import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import texts
@@ -380,6 +382,77 @@ class ScheduleBot:
         bot_id = (self.me or {}).get("id")
         return bool(bot_id) and (sender or {}).get("id") == bot_id
 
+    def restore_from_document(self, chat_id, user, message):
+        """Аварийное восстановление: владелец прислал файл копии базы.
+
+        Зачем: если база потерялась (например, восстановилась пустой), а в чате
+        сохранилась старая копия, владелец пересылает файл боту — и данные
+        возвращаются. Текущая база перед заменой сохраняется рядом.
+        """
+        document = message.get("document") or {}
+        name = str(document.get("file_name") or "").lower()
+        if not user.get("is_admin"):
+            self.tg.send_message(chat_id, "Файлы принимаю только от админа бота.")
+            return True
+        if not (name.endswith(".gz") or name.endswith(".db")):
+            self.tg.send_message(chat_id, "Это не похоже на копию базы: жду файл "
+                                          "<code>schedule-backup.db.gz</code>.")
+            return True
+        if not document.get("file_id"):
+            return False
+
+        import snapshot as snapshot_module
+
+        upload = os.path.join(ROOT, "data", "upload-%s" % uuid.uuid4().hex[:8])
+        try:
+            self.tg.download_file(document["file_id"], upload)
+            with open(upload, "rb") as handle:
+                blob = handle.read()
+        except Exception as error:
+            self.log("Файл копии не скачался: %s" % error)
+            self.tg.send_message(chat_id, "😔 Не удалось скачать файл: %s"
+                                 % texts.esc(str(error)[:120]))
+            return True
+        finally:
+            if os.path.exists(upload):
+                try:
+                    os.remove(upload)
+                except OSError:
+                    pass
+
+        before = self.store.count_users()
+        backup = os.path.join(ROOT, "data", "before-restore-%s.db"
+                              % datetime.now().strftime("%Y%m%d-%H%M%S"))
+        try:
+            shutil.copy2(self.store.path, backup)
+        except Exception:
+            backup = ""
+        restored = snapshot_module.restore_bytes(
+            blob, self.store.path, expected_provider=self.provider.name)
+        if not restored:
+            self.tg.send_message(
+                chat_id,
+                "😔 Файл не подошёл: это не копия базы этого бота "
+                "(или копия другого вуза). База не тронута.")
+            return True
+
+        self.store.delete_user(self.me.get("id") or 0)
+        after = self.store.count_users()
+        self.store.set_meta("snapshot_message_id", "")
+        self.store.set_meta("snapshot_users", str(after))
+        self.log("База восстановлена из присланного файла: пользователей было %d, стало %d"
+                 % (before, after))
+        self.tg.send_message(
+            chat_id,
+            "✅ <b>База восстановлена из файла</b>\n\n"
+            "Пользователей было: %d, стало: <b>%d</b>%s\n\n"
+            "Следующая копия закрепится сама; прежняя база сохранена рядом на случай "
+            "отката." % (before, after,
+                         ("\nРезервная копия прежней базы: <code>%s</code>"
+                          % texts.esc(os.path.basename(backup))) if backup else ""),
+            reply_markup=self.main_keyboard())
+        return True
+
     def ensure_admin_rights(self, user):
         """Владелец бота (OWNER_ID) — всегда админ.
 
@@ -409,6 +482,9 @@ class ScheduleBot:
         user = self.ensure_admin_rights(user)
         self._current_user = user
         self.store.touch_user(chat_id)      # статистика: активность и число сообщений
+        # Владелец может прислать файл копии — восстановим базу из него.
+        if message.get("document") and self.restore_from_document(chat_id, user, message):
+            return
         if not text:
             # Служебные сообщения (закрепление копии базы, смена названия чата и т.п.)
             # приходят без текста — отвечать на них нельзя, иначе бот «разговаривает»

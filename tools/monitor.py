@@ -236,10 +236,11 @@ def check_schedule(owner_id):
         groups = sorted({row[2] for row in data["users"] if row[2]})
         for group in groups[:5]:
             for day in (today, today + timedelta(days=1)):
+                count, error = 0, ""
                 try:
                     count, error = schedule_lessons(group, bot["university"], day)
-                except Exception as error:
-                    count, error = None, str(error)[:120]
+                except Exception as failure:
+                    count, error = 0, str(failure)[:120]
                 if error:
                     problem("%s / %s: расписание не получено (%s)"
                             % (bot["title"], group, error))

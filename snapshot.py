@@ -507,6 +507,13 @@ class SnapshotManager:
             self._fail("в базе %d пользователей, а в прошлой копии было %d — "
                        "копию не перезаписываю" % (users_now, users_before))
             return False
+        # Отдельная защита для случая, когда база восстановилась пустой: в пустой
+        # базе нет и отметки о прошлой копии, поэтому смотрим сам чат — если там
+        # уже закреплена копия, пустой базой её не трогаем.
+        if users_now == 0 and self._has_pinned_backup():
+            self._fail("база пустая, а в чате есть закреплённая копия — "
+                       "копию не перезаписываю (данные в копии целы)")
+            return False
 
         try:
             blob = backup_bytes(db_path)
@@ -600,6 +607,20 @@ class SnapshotManager:
         except Exception:
             return 0
         return int(raw) if str(raw or "").strip().isdigit() else 0
+
+    def _has_pinned_backup(self):
+        """Есть ли в чате владельца закреплённая копия базы.
+
+        Нужно для случая «база пустая после неудачного восстановления»: в пустой
+        базе нет отметок о прошлых копиях, поэтому спрашиваем сам чат — иначе
+        единственная копия с данными будет затёрта пустой.
+        """
+        try:
+            chat = self.tg.call("getChat", {"chat_id": self.owner_id}) or {}
+        except Exception:
+            return False
+        pinned = chat.get("pinned_message") or {}
+        return bool((pinned.get("document") or {}).get("file_id"))
 
     def request_save(self, delay_seconds=SAVE_REQUEST_DELAY_SECONDS):
         """Попросить сохранить базу после важных изменений (ДЗ, смена группы).

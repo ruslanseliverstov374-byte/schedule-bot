@@ -23,6 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from bot import ScheduleBot      # noqa: E402
+from store import Store          # noqa: E402
 
 CHECKS = []
 FAILURES = []
@@ -43,6 +44,18 @@ class FakeTelegram:
     def __init__(self):
         self.messages = []
         self.documents = []
+        self.downloads = {}       # file_id -> путь к файлу, который «скачают»
+        self.downloaded = []
+
+    def download_file(self, file_id, destination):
+        """Поддельная загрузка файла: копируем заранее подготовленный файл."""
+        source = self.downloads.get(file_id)
+        if not source:
+            raise RuntimeError("нет файла %s" % file_id)
+        import shutil
+        shutil.copy2(source, destination)
+        self.downloaded.append((file_id, destination))
+        return destination
 
     def send_message(self, chat_id, text, reply_markup=None, parse_mode="HTML",
                      disable_notification=False):
@@ -471,6 +484,67 @@ def main():
         click(bot, admin, "bc:cancel")
         check("выбор получателя можно отменить", "отменена" in tg.last_text(admin).lower(),
               tg.last_text(admin)[:80])
+
+        print("\n10. Аварийное восстановление из присланного файла")
+        # Готовим «богатую» базу: 3 пользователя и группы.
+        rich_path = os.path.join(temp_dir, "rich.db")
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(rich_path + suffix):
+                os.remove(rich_path + suffix)
+        rich = Store(rich_path)
+        rich.set_meta("provider", "unifirst")
+        for index, group in ((401, "26282"), (402, "26281"), (403, "26101")):
+            rich.ensure_user(index, "user%d" % index, "Студент %d" % index)
+            rich.update_user(index, group_title=group)
+        import snapshot as snapshot_module
+        packed = os.path.join(temp_dir, "backup.db.gz")
+        with open(packed, "wb") as handle:
+            handle.write(snapshot_module.backup_bytes(rich_path))
+        check("копия для восстановления собрана", os.path.getsize(packed) > 100,
+              os.path.getsize(packed))
+
+        # Бот «потерял» базу: чистим пользователей и группы.
+        store.execute("DELETE FROM users")
+        check("база перед восстановлением пуста", store.count_users() == 0,
+              store.count_users())
+        tg.downloads["file-1"] = packed
+        tg.clear()
+        bot.handle_message({"message_id": 5, "date": 0, "chat": {"id": admin},
+                            "from": {"id": admin, "username": "u100",
+                                     "first_name": "Руслан"},
+                            "document": {"file_id": "file-1",
+                                         "file_name": "schedule-backup.db.gz"}})
+        check("бот отчитался о восстановлении",
+              "База восстановлена из файла" in tg.last_text(admin),
+              tg.last_text(admin)[:100])
+        restored = Store(bot.store.path)
+        check("пользователи вернулись", restored.count_users() == 3,
+              restored.count_users())
+        check("группы студентов на месте",
+              [row["group_title"] for row in restored.all_users()] ==
+              ["26282", "26281", "26101"],
+              [row["group_title"] for row in restored.all_users()])
+        check("в восстановленной базе есть админ",
+              any(row["is_admin"] for row in restored.all_users()),
+              [row["is_admin"] for row in restored.all_users()])
+        tg.clear()
+        send_text(bot, admin, "/whoami", "Руслан")
+        owner_row = bot.store.get_user(admin)
+        check("владелец вернулся в базу и снова админ",
+              bool(owner_row and owner_row["is_admin"]), owner_row)
+        check("прежняя база сохранена для отката",
+              any(name.startswith("before-restore-")
+                  for name in os.listdir(os.path.join(ROOT, "data"))), None)
+        tg.clear()
+        tg.downloads["file-2"] = packed
+        bot.handle_message({"message_id": 6, "date": 0, "chat": {"id": student},
+                            "from": {"id": student, "username": "u200",
+                                     "first_name": "Софа"},
+                            "document": {"file_id": "file-2",
+                                         "file_name": "schedule-backup.db.gz"}})
+        check("от студента файл не принимается",
+              "только от админа" in tg.last_text(student).lower(),
+              tg.last_text(student)[:80])
 
     finally:
         try:

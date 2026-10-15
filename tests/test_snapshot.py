@@ -575,6 +575,33 @@ def check_guards(workdir):
           str(tg.documents[0].get("filename")).endswith("schedule-backup.db.gz"),
           tg.documents[0].get("filename"))
 
+    # 5. Пустая база не затирает закреплённую копию, даже если в самой базе
+    #    отметок нет: именно так 15 октября потерялись 8 студентов — база
+    #    восстановилась пустой и перезаписала единственную копию.
+    fresh_dir = os.path.join(workdir, "guards-fresh")
+    os.makedirs(fresh_dir, exist_ok=True)
+    fresh_db = os.path.join(fresh_dir, "bot.db")
+    fresh_store = Store(fresh_db)
+    fresh_store.set_meta("provider", "unifirst")
+    pinned_tg = FakeTelegram()
+    pinned_tg.pinned_message = {"message_id": 5, "caption": "Копия",
+                                "document": {"file_id": "file-5",
+                                             "file_name": "schedule-backup.db.gz"}}
+    fresh_manager = SnapshotManager(pinned_tg, fresh_store, OWNER_ID,
+                                    logger=lambda message: None)
+    check("пустая база не затирает закреплённую копию",
+          fresh_manager.save(force=True) is False)
+    check("в логе сказано про пустую базу и копию",
+          "база пустая" in str(fresh_manager.last_error), fresh_manager.last_error)
+    check("копия при этом не отправлялась", not pinned_tg.documents)
+
+    # 6. Если закреплённой копии нет (совсем новый бот) — сохранять можно.
+    new_tg = FakeTelegram()
+    new_manager = SnapshotManager(new_tg, fresh_store, OWNER_ID,
+                                  logger=lambda message: None)
+    check("у нового бота копия делается", new_manager.save(force=True) is True)
+    check("и файл ушёл в чат", len(new_tg.documents) == 1, new_tg.documents)
+
 
 def main():
     workdir = make_workdir()

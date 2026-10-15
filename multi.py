@@ -20,10 +20,12 @@
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
 import traceback
+import urllib.parse
 from datetime import datetime
 
 from bot import (DEFAULT_DB, ROOT, ScheduleBot, clean_token, env_value, make_logger,
@@ -66,23 +68,69 @@ def token_info(token):
         return None, None, str(error)[:160]
 
 
+def count_users_in_db(db_path):
+    """Сколько пользователей в файле базы (0, если файла нет или он битый)."""
+    try:
+        connection = sqlite3.connect(
+            "file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(db_path)),
+            uri=True, timeout=15)
+        try:
+            return int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+        finally:
+            connection.close()
+    except Exception:
+        return 0
+
+
+def warn_owner(token, owner_id, text, logger):
+    """Пишет владельцу в чат: нужен, когда база не восстановилась."""
+    try:
+        tgbot.Telegram(token, timeout=30).send_message(int(owner_id), text)
+        return True
+    except Exception as error:
+        logger("не удалось предупредить владельца: %s" % error)
+        return False
+
+
 def restore_if_needed(token, db_path, owner_id, logger, provider=""):
     """Поднимает базу из закреплённой копии, если файла базы нет (облако).
 
     ``provider`` — вуз бота: копия чужого вуза не восстанавливается (в одном
     сервисе живут два бота, и раньше они могли перепутать базы).
+
+    Если восстановить не удалось или база оказалась пустой, владелец получает
+    предупреждение в чат: раньше это происходило молча, и пустая база затирала
+    единственную копию с данными.
     """
     if not owner_id or os.path.exists(db_path):
         return False
-    try:
-        restored = restore_from_chat(tgbot.Telegram(token), int(owner_id), db_path, logger,
-                                     expected_provider=provider)
+    restored = False
+    for attempt in (1, 2):
+        try:
+            restored = restore_from_chat(tgbot.Telegram(token), int(owner_id), db_path,
+                                         logger, expected_provider=provider)
+        except Exception as error:
+            logger("Восстановление базы (попытка %d) не удалось: %s" % (attempt, error))
+            restored = False
         if restored:
-            logger("База восстановлена из закреплённой копии в чате")
-        return restored
-    except Exception as error:
-        logger("Восстановление базы не удалось: %s" % error)
+            break
+        time.sleep(3 * attempt)
+    if not restored:
+        logger("База не восстановлена — бот запустится с пустой базой")
+        warn_owner(token, owner_id,
+                   "⚠️ <b>Не удалось восстановить базу из закреплённой копии.</b>\n\n"
+                   "Бот запустился с пустой базой, но копия в этом чате цела — "
+                   "я не буду её перезаписывать. Напишите разработчику: базу можно "
+                   "поднять из копии вручную.", logger)
         return False
+    users = count_users_in_db(db_path)
+    logger("База восстановлена из закреплённой копии в чате (пользователей: %d)" % users)
+    if users == 0:
+        warn_owner(token, owner_id,
+                   "⚠️ <b>База восстановилась пустой</b> (в копии нет пользователей).\n\n"
+                   "Проверьте /service.json и напишите разработчику — возможно, копия "
+                   "была испорчена раньше.", logger)
+    return True
 
 
 def main(argv=None):
