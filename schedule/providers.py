@@ -16,6 +16,7 @@
 import hashlib
 import json
 import os
+import threading
 
 from schedule import kgasu, unifirst
 
@@ -74,6 +75,9 @@ class KgasuProvider:
         self._grids = {}          # ссылка на файл -> разобранная таблица (в памяти)
         self._groups = groups_cache
         self.log = logger if callable(logger) else (lambda message: None)
+        # Разбор скана (OCR) тяжёлый: не даём движку и запросу студента делать
+        # его одновременно — второй ждёт результата первого, а не запускает свой.
+        self._grid_lock = threading.Lock()
 
     def _progress(self, message):
         """Пишет ход разбора в лог бота (видно, когда распознаётся PDF-скан)."""
@@ -108,7 +112,9 @@ class KgasuProvider:
                 return row["source_url"]
         if self._groups is None:
             try:
-                self._groups = kgasu.groups()
+                # only=group — обход страниц останавливается на найденной группе:
+                # это экономит десятки секунд на холодном старте.
+                self._groups = kgasu.groups(only=group)
             except kgasu.KgasuError as error:
                 raise ProviderError(str(error))
         found = kgasu.find_group(self._groups, group)
@@ -119,66 +125,104 @@ class KgasuProvider:
     # --------------------------------------------------------- расписание
 
     def grid(self, group, force=False):
-        """Разобранная таблица расписания группы (с кэшем в памяти и на диске)."""
+        """Разобранная таблица расписания группы (кэш в памяти, базе и на диске)."""
         file_url = self._file_url(group)
         if not force and file_url in self._grids:
             return self._grids[file_url]
-        try:
-            blob, path = kgasu.download(file_url,
-                                        max_age_minutes=0 if force else self.cache_minutes)
-            file_hash = hashlib.sha1(blob).hexdigest()[:16]
-            # Разбор PDF-скана занимает десятки секунд (OCR), поэтому результат
-            # кладём на диск: после перезапуска сервиса расписание берётся готовым.
+        with self._grid_lock:
+            # Пока ждали очередь, таблицу мог разобрать другой поток.
+            if not force and file_url in self._grids:
+                return self._grids[file_url]
+            try:
+                blob, path = kgasu.download(file_url,
+                                            max_age_minutes=0 if force else self.cache_minutes)
+                file_hash = hashlib.sha1(blob).hexdigest()[:16]
+                # Разбор PDF-скана занимает десятки секунд (OCR), поэтому результат
+                # кладём в базу и на диск: после перезапуска расписание берётся готовым.
+                if not force:
+                    cached = self._load_grid_cache(file_url, file_hash)
+                    if cached is not None:
+                        self._grids[file_url] = cached
+                        return cached
+                grid = kgasu.prepare(blob, file_url.split("/")[-1], progress=self._progress)
+            except kgasu.KgasuError as error:
+                raise ProviderError(str(error))
+            grid["file_hash"] = file_hash
+            grid["file_url"] = file_url
             if not force:
-                cached = self._load_grid_cache(file_url, file_hash)
-                if cached is not None:
-                    self._grids[file_url] = cached
-                    return cached
-            grid = kgasu.prepare(blob, file_url.split("/")[-1], progress=self._progress)
-        except kgasu.KgasuError as error:
-            raise ProviderError(str(error))
-        grid["file_hash"] = file_hash
-        grid["file_url"] = file_url
-        if not force:
-            self._grids[file_url] = grid
-            self._save_grid_cache(file_url, file_hash, grid)
-        return grid
+                self._grids[file_url] = grid
+                self._save_grid_cache(file_url, file_hash, grid)
+            return grid
 
     # ------------------------------------------------- кэш разбора на диске
+
+    def _grid_cache_key(self, file_url, file_hash):
+        """Ключ в базе: кэш разбора переживает перезапуск сервиса.
+
+        На бесплатном Render локальный диск обнуляется при перезапуске, а база
+        восстанавливается из закреплённой копии в Telegram. Поэтому тяжёлый
+        разбор скана (OCR) кладём ещё и в базу: после перезапуска расписание
+        берётся готовым за миллисекунды, а не за минуту.
+        """
+        digest = hashlib.sha1(file_url.encode("utf-8")).hexdigest()[:12]
+        return "kgasu_grid:%s:%s" % (digest, file_hash)
 
     def _grid_cache_path(self, file_url, file_hash):
         digest = hashlib.sha1(file_url.encode("utf-8")).hexdigest()[:12]
         return os.path.join(kgasu.CACHE_DIR, "grid-%s-%s.json" % (digest, file_hash))
 
     def _load_grid_cache(self, file_url, file_hash):
-        """Разобранная таблица с диска: только если файл не менялся (тот же хеш)."""
-        path = self._grid_cache_path(file_url, file_hash)
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, encoding="utf-8") as handle:
-                grid = json.load(handle)
-        except (OSError, ValueError):
-            return None
-        if not grid.get("rows"):
+        """Разобранная таблица: только если файл не менялся (тот же хеш)."""
+        grid = None
+        if self.store:
+            try:
+                raw = self.store.get_meta(self._grid_cache_key(file_url, file_hash))
+                if raw:
+                    grid = json.loads(raw)
+            except Exception:
+                grid = None
+        if grid is None:
+            path = self._grid_cache_path(file_url, file_hash)
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    grid = json.load(handle)
+            except (OSError, ValueError):
+                return None
+        if not grid or not grid.get("rows"):
             return None
         grid["file_url"] = file_url
         grid["file_hash"] = file_hash
         return grid
 
     def _save_grid_cache(self, file_url, file_hash, grid):
-        """Кладёт разобранную таблицу на диск.
+        """Кладёт разобранную таблицу на диск и в базу.
 
         Ошибки кэша не должны ломать запрос расписания: если таблица почему-то
         не сериализуется, просто работаем без кэша.
         """
-        path = self._grid_cache_path(file_url, file_hash)
+        payload = None
         try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(grid, handle, ensure_ascii=False, default=str)
+            payload = json.dumps(grid, ensure_ascii=False, default=str)
         except Exception as error:
-            self._progress("кэш разбора не сохранился: %s" % error)
+            self._progress("кэш разбора не сериализуется: %s" % error)
+        if payload:
+            try:
+                if len(payload) <= 400_000:
+                    self.store.set_meta(self._grid_cache_key(file_url, file_hash), payload)
+                else:
+                    self._progress("кэш разбора слишком большой для базы (%d символов)"
+                                   % len(payload))
+            except Exception as error:
+                self._progress("кэш разбора не сохранился в базу: %s" % error)
+            path = self._grid_cache_path(file_url, file_hash)
+            try:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+            except Exception as error:
+                self._progress("кэш разбора не сохранился на диск: %s" % error)
 
     def week_lessons(self, group, year, week, force=False):
         """Пары группы на неделю: перебираем семь дней недели."""

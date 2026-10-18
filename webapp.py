@@ -53,7 +53,7 @@ WORKER_TIMEOUT = 5.0            # сколько секунд ждём рабо�
 #: Сколько максимум обрабатываем одно сообщение. Если распознавание скана или
 #: запрос к сайту завис, обновление считается ошибкой, но очередь двигается
 #: дальше: один студент не должен блокировать бота для всех.
-UPDATE_TIMEOUT = float(os.environ.get("UPDATE_TIMEOUT", "90"))
+UPDATE_TIMEOUT = float(os.environ.get("UPDATE_TIMEOUT", "180"))
 
 STYLE = """
     :root { color-scheme: dark; }

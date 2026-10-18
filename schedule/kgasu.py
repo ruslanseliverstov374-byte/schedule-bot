@@ -140,11 +140,15 @@ def filter_value(options, wanted, default=""):
 
 
 def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=None,
-           max_pages=25):
+           max_pages=25, only=None):
     """Список всех групп с файлами расписания.
 
     Внимание: страница отдаёт по 20 файлов и разбита на страницы (у КГАСУ их около
     девяти — 290 групп), поэтому обходим все страницы, а не только первую.
+
+    ``only`` — код группы, которую ищем: тогда обход останавливается на странице,
+    где группа найдена. Это экономит десятки секунд при холодном старте: полный
+    список нужен только для подсказок, а расписание — одной группе.
 
     Возвращает [{'name': '26РП01', 'file_url': ..., 'file_name': ..., 'file_ext': 'docx',
                  'shared_with': ['26РП02']}].
@@ -159,6 +163,7 @@ def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=No
     pattern = re.compile(
         r'href="(https://st\.kgasu\.ru/[^"]+\.(?:docx?|xlsx?|pdf))"[^>]*>([^<]{1,120})</a>',
         re.I)
+    query = (only or "").strip().lower().replace(" ", "")
     result = []
     seen_files = set()
     seen_groups = set()
@@ -193,6 +198,11 @@ def groups(tip=TIP_LESSONS, year="2026-2027", semester="Осенний", html=No
                     "shared_with": [other for other in codes if other != code],
                 })
         if not fresh:
+            break
+        # Нашли нужную группу — дальше страницы обходить незачем.
+        if query and any(query == item["name"].strip().lower().replace(" ", "")
+                         or query in item["name"].strip().lower().replace(" ", "")
+                         for item in result):
             break
     return result
 
