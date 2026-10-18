@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Проверка веб-слоя бота (webapp.py): health-check, страница состояния, вебхук.
 
 Запуск:
@@ -317,6 +317,8 @@ def main():
         wait_for(lambda: len(collector.snapshot()) == 5)
 
         print("\n7. Счётчики stats()")
+        wait_for(lambda: app.stats()["updates_handled"] == 5)
+
         counters = app.stats()
         check("принято ровно 5 обновлений", counters["updates_received"] == 5,
               counters["updates_received"])
@@ -560,3 +562,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

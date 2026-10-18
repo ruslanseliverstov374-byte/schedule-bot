@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -38,6 +39,14 @@ DEFAULT_DB = os.path.join(ROOT, "data", "bot.db")
 LOCK_FILE = os.path.join(ROOT, "data", "bot.lock")
 TOKEN_FILE = os.path.join(ROOT, "token.txt")
 ENV_FILE = os.path.join(ROOT, ".env")
+
+#: Сколько ждём обновление недели в запросе студента. Скан КГАСУ распознаётся
+#: минутами, поэтому дольше ждать нельзя: показываем кэш, а разбор идёт в фоне.
+WEEK_WAIT_SECONDS = float(os.environ.get("WEEK_WAIT_SECONDS", "12"))
+
+
+class WarmingUp(Exception):
+    """Расписание ещё готовится (например, в фоне распознаётся скан КГАСУ)."""
 LOG_FILE = os.path.join(ROOT, "logs", "bot.log")
 
 EVENING_TIMES = ["18:00", "19:00", "20:00", "21:00", "22:00"]
@@ -1274,6 +1283,37 @@ class ScheduleBot:
         self.send_group_page(chat_id, user, 0)
         return False
 
+    def ensure_week_bounded(self, group_title, year, week, wait=WEEK_WAIT_SECONDS):
+        """Как `engine.ensure_week`, но не ждёт дольше `wait` секунд.
+
+        Скан расписания КГАСУ на бесплатном сервере распознаётся минутами, и
+        держать студента всё это время нельзя. Если не успели — отдаём
+        сохранённый кэш (даже устаревший), а разбор продолжается в фоне:
+        движок всё равно тянет расписание для групп с подписчиками.
+        """
+        box = {}
+
+        def work():
+            try:
+                box["lessons"], _, _ = self.engine.ensure_week(group_title, year, week)
+                box["ok"] = True
+            except Exception as error:      # ошибку разберём в вызывающем потоке
+                box["error"] = error
+
+        thread = threading.Thread(target=work, daemon=True, name="week-fetch")
+        thread.start()
+        thread.join(wait)
+        if thread.is_alive():
+            row = self.store.get_timetable(group_title, year, week)
+            if row and row.get("lessons"):
+                self.log("Неделя %s/%s ещё обновляется — показываю кэш"
+                         % (year, week))
+                return row["lessons"], False
+            raise WarmingUp("расписание обновляется")
+        if not box.get("ok"):
+            raise box.get("error") or WarmingUp("расписание обновляется")
+        return box["lessons"], True
+
     def lessons_of(self, chat_id, user, day):
         """Пары на дату; при недоступности API — из кэша.
 
@@ -1284,8 +1324,9 @@ class ScheduleBot:
         group_title = user["group_title"]
         year, week = unifirst.iso_year_week(day)
         try:
-            lessons, _, _ = self.engine.ensure_week(group_title, year, week)
-            online = True
+            lessons, online = self.ensure_week_bounded(group_title, year, week)
+        except WarmingUp:
+            raise
         except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("API недоступен для %s: %s" % (group_title, error))
             row = self.store.get_timetable(group_title, year, week)
@@ -1396,7 +1437,11 @@ class ScheduleBot:
         if not self.require_group(chat_id, user):
             return
         self.tg.send_chat_action(chat_id)
-        lessons, online = self.lessons_of(chat_id, user, day)
+        try:
+            lessons, online = self.lessons_of(chat_id, user, day)
+        except WarmingUp:
+            self.send_warming_up(chat_id)
+            return
         day_lessons = [item for item in lessons if item.get("date") == day.isoformat()]
         day_lessons = providers.filter_by_subgroup(day_lessons, user.get("subgroup"))
         # Подпись для прошедших и далёких дней: студент должен понимать,
@@ -1488,8 +1533,10 @@ class ScheduleBot:
         self.tg.send_chat_action(chat_id)
         group_title = user["group_title"]
         try:
-            lessons, _, _ = self.engine.ensure_week(group_title, year, week)
-            online = True
+            lessons, online = self.ensure_week_bounded(group_title, year, week)
+        except WarmingUp:
+            self.send_warming_up(chat_id, year, week)
+            return
         except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("API недоступен: %s" % error)
             row = self.store.get_timetable(group_title, year, week)
@@ -1501,6 +1548,21 @@ class ScheduleBot:
         if note:
             text += "\n\n" + note
         self.tg.send_message(chat_id, text, reply_markup=self.week_keyboard(year, week))
+
+    def send_warming_up(self, chat_id, year=None, week=None):
+        """Сообщение, пока расписание впервые разбирается (скан КГАСУ)."""
+        rows = []
+        if year is not None and week is not None:
+            rows.append([tgbot.btn("🔄 Проверить ещё раз", "wk:%d:%d" % (year, week))])
+        rows.append([tgbot.btn("🏠 Меню", "menu")])
+        self.tg.send_message(
+            chat_id,
+            "⏳ <b>Готовлю расписание</b>\n\n"
+            "Сайт вуза выложил расписание сканом — я его распознаю. На бесплатном "
+            "сервере это занимает пару минут, поэтому пока показывать нечего.\n\n"
+            "Напиши «📅 Сегодня» через минуту — расписание уже будет готово и "
+            "дальше будет открываться мгновенно.",
+            reply_markup=tgbot.inline(rows))
 
     # --------------------------------------------------------- выбор группы
 
