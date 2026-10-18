@@ -50,6 +50,10 @@ SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 MAX_BODY = 1024 * 1024          # столько Telegram не присылает: защита от мусора
 BACKLOG_WARNING = 100           # с какого размера очереди предупреждать в лог
 WORKER_TIMEOUT = 5.0            # сколько секунд ждём рабочий поток в stop()
+#: Сколько максимум обрабатываем одно сообщение. Если распознавание скана или
+#: запрос к сайту завис, обновление считается ошибкой, но очередь двигается
+#: дальше: один студент не должен блокировать бота для всех.
+UPDATE_TIMEOUT = float(os.environ.get("UPDATE_TIMEOUT", "90"))
 
 STYLE = """
     :root { color-scheme: dark; }
@@ -247,6 +251,9 @@ class StatusApp:
                               endpoint.get("handler"))
         self._lock = threading.RLock()
         self._counters = {"updates_received": 0, "updates_handled": 0, "errors": 0}
+        # Счётчики по каждому маршруту: у одного сервиса два бота, и важно
+        # видеть, чья очередь встала, не заглядывая в логи Render.
+        self._endpoint_counters = {}
         self._started_at = None
         self._server = None
         #: Последняя ошибка обработки и время последнего обновления — их отдаёт
@@ -289,7 +296,7 @@ class StatusApp:
             for path in (self.endpoints or {"/telegram": None}):
                 path_queue = queue.Queue()
                 worker = threading.Thread(target=self._worker_loop,
-                                          args=(path_queue, stop_event),
+                                          args=(path_queue, stop_event, path),
                                           name="webapp-worker%s"
                                                % ("" if path == "/telegram"
                                                   else path.replace("/", "-")),
@@ -380,18 +387,21 @@ class StatusApp:
         оно пришло: у каждого бота в общем сервисе он свой, и очереди тоже свои.
         """
         self._bump("updates_received")
+        self._bump_endpoint(path, "received")
         target_queue = self._queues.get(path)
         if target_queue is None:
             # Сервер ещё не поднят или маршрут неизвестен — общая очередь.
             if not self._queues:
                 self._queues[path] = queue.Queue()
             target_queue = self._queues.setdefault(path, next(iter(self._queues.values())))
-        target_queue.put((update, handler))
+        target_queue.put((update, handler, path))
         size = target_queue.qsize()
+        self._set_endpoint(path, "queue", size)
         if size >= BACKLOG_WARNING and size % BACKLOG_WARNING == 0:
-            self.log("Очередь обновлений выросла: %d (обработчик не успевает)" % size)
+            self.log("Очередь обновлений %s выросла: %d (обработчик не успевает)"
+                     % (path, size))
 
-    def _worker_loop(self, work_queue, stop_event):
+    def _worker_loop(self, work_queue, stop_event, path=""):
         """Разбирает очередь по одному обновлению: порядок сохраняется."""
         while True:
             if stop_event.is_set() and work_queue.empty():
@@ -402,22 +412,88 @@ class StatusApp:
                 continue
             if item is None:
                 return
-            update, handler = item if isinstance(item, tuple) else (item, None)
-            self._handle_update(update, handler)
+            if isinstance(item, tuple) and len(item) == 3:
+                update, handler, item_path = item
+            elif isinstance(item, tuple):
+                update, handler = item
+                item_path = path
+            else:
+                update, handler, item_path = item, None, path
+            self._handle_update(update, handler, item_path)
 
-    def _handle_update(self, update, handler=None):
-        """Вызывает обработчик и ведёт счётчики. Исключения наружу не выходят."""
+    def _handle_update(self, update, handler=None, path=""):
+        """Вызывает обработчик и ведёт счётчики. Исключения наружу не выходят.
+
+        Обработчик выполняется в отдельном потоке с ограничением по времени:
+        если распознавание скана или запрос к сайту застрял, очередь не встаёт —
+        сообщение учитывается как ошибка, а следующий студент всё равно получит
+        ответ. Тяжёлые операции ограничены и внутри себя, это последняя страховка.
+        """
         target = handler if handler is not None else self.on_update
         self.last_update_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            if target is not None:
+        if target is None:
+            self._bump("updates_handled")
+            self._bump_endpoint(path, "handled")
+            return
+        box = {}
+
+        def run():
+            try:
                 target(update)
-        except Exception as error:
+            except BaseException as error:      # noqa: BLE001 — поток не должен умирать
+                box["error"] = error
+
+        thread = threading.Thread(target=run, name="update-%s" % (path or "bot"),
+                                  daemon=True)
+        thread.start()
+        thread.join(UPDATE_TIMEOUT)
+        if thread.is_alive():
             self._bump("errors")
+            self._bump_endpoint(path, "errors")
+            self._bump_endpoint(path, "timeouts")
+            self.last_error = "обработка дольше %d с (%s)" % (UPDATE_TIMEOUT, path)
+            self.log("Обновление %s обрабатывается дольше %d с — пропускаю, "
+                     "чтобы не встала очередь" % (path, UPDATE_TIMEOUT))
+            return
+        error = box.get("error")
+        if error is not None:
+            self._bump("errors")
+            self._bump_endpoint(path, "errors")
             self.last_error = "%s: %s" % (type(error).__name__, str(error)[:160])
+            self._set_endpoint(path, "last_error", self.last_error)
             self.log("Ошибка обработки обновления: %s" % error)
             return
         self._bump("updates_handled")
+        self._bump_endpoint(path, "handled")
+
+    def _endpoint(self, path):
+        """Счётчики одного маршрута (бота) — создаются при первом обращении."""
+        with self._lock:
+            return self._endpoint_counters.setdefault(path or "/telegram", {
+                "received": 0, "handled": 0, "errors": 0, "timeouts": 0,
+                "queue": 0, "last_error": "", "last_update_at": "",
+            })
+
+    def _bump_endpoint(self, path, name, amount=1):
+        counter = self._endpoint(path)
+        with self._lock:
+            counter[name] = counter.get(name, 0) + amount
+
+    def _set_endpoint(self, path, name, value):
+        counter = self._endpoint(path)
+        with self._lock:
+            counter[name] = value
+
+    def endpoint_stats(self):
+        """Счётчики по каждому боту: видно, чья очередь встала."""
+        with self._lock:
+            result = {}
+            for path, counter in self._endpoint_counters.items():
+                item = dict(counter)
+                target_queue = self._queues.get(path)
+                item["queue"] = target_queue.qsize() if target_queue is not None else 0
+                result[path] = item
+            return result
 
     def _bump(self, name, amount=1):
         """Увеличивает счётчик (вызывается из потоков сервера и рабочего)."""
@@ -633,6 +709,10 @@ class _StatusHandler(BaseHTTPRequestHandler):
             "last_error": getattr(app, "last_error", "") if app is not None else "",
             "last_update_at": getattr(app, "last_update_at", "") if app is not None else "",
         }
+        # По каждому боту отдельно: видно, у кого встала очередь, сколько
+        # сообщений ждёт и когда была последняя ошибка. Это главный признак
+        # «бот не отвечает», когда сам сервис жив.
+        payload["bots_updates"] = app.endpoint_stats() if app is not None else {}
         body = json.dumps(payload, ensure_ascii=False, indent=2)
         self._send(200, body, "application/json; charset=utf-8", head_only=head_only)
 

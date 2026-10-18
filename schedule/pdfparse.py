@@ -80,6 +80,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zlib
 
 __all__ = [
@@ -124,7 +125,15 @@ PAGE_GAP = 240
 OCR_LANG = "rus"
 OCR_PSM = 6
 OCR_DPI = 300
-OCR_TIMEOUT = 180
+#: Сколько даём tesseract на одну страницу. Скан А4 при 300 dpi распознаётся
+#: за 5–15 секунд; больше — значит что-то пошло не так, и лучше честно ответить
+#: студенту, чем держать очередь бота.
+OCR_TIMEOUT = int(os.environ.get("OCR_TIMEOUT", "75"))
+#: Больше страниц не распознаём: расписание одной группы умещается в 2–3, а
+#: каждая лишняя страница — это секунды ожидания для всех студентов сразу.
+OCR_MAX_PAGES = int(os.environ.get("OCR_MAX_PAGES", "4"))
+#: Общий бюджет на весь PDF: если не уложились, отдаём понятную ошибку.
+OCR_TIME_BUDGET = float(os.environ.get("OCR_TIME_BUDGET", "150"))
 
 #: колонки TSV, которые нужны от tesseract (ищутся по именам в шапке)
 _TSV_COLUMNS = ("text", "left", "top", "width", "height", "conf")
@@ -1027,13 +1036,27 @@ def table_from_pdf(blob, group_hint="", progress=None):
         return {"columns": [], "rows": [], "text": ""}
     if not ocr_available():
         raise PdfError("OCR недоступен: в системе нет tesseract")
+    if len(pages) > OCR_MAX_PAGES:
+        log("страниц больше %d — распознаю первые %d" % (OCR_MAX_PAGES, OCR_MAX_PAGES))
+        pages = pages[:OCR_MAX_PAGES]
 
+    started = time.time()
     words = []
     shift = 0
     height = 0
     for number, image in enumerate(pages, 1):
-        log("страница %d из %d: распознавание (tesseract)" % (number, len(pages)))
-        tsv = ocr_tsv(image)
+        spent = time.time() - started
+        if spent > OCR_TIME_BUDGET:
+            raise PdfError(
+                "распознавание скана не уложилось в %d секунд — файл слишком "
+                "большой или сервис перегружен. Открой файл напрямую со страницы "
+                "расписания КГАСУ." % int(OCR_TIME_BUDGET))
+        log("страница %d из %d: распознавание (tesseract, уже %.0f с)"
+            % (number, len(pages), spent))
+        # Остаток общего бюджета передаём странице: одна страница не должна
+        # съесть всё время.
+        page_timeout = max(15, min(OCR_TIMEOUT, int(OCR_TIME_BUDGET - spent)))
+        tsv = ocr_tsv(image, timeout=page_timeout)
         page_words = words_from_tsv(tsv)
         log("страница %d: слов %d" % (number, len(page_words)))
         bottom = 0

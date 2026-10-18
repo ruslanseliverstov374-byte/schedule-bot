@@ -248,6 +248,38 @@ def day_schedule(day, lessons, group_title, label=None, note=""):
     return header + "\n" + "\n\n".join(slot_block(block) for block in blocks)
 
 
+def my_subgroup_screen(variants, choices):
+    """Экран выбора своей подгруппы: по каждому предмету — свой преподаватель.
+
+    У ПГУФКСиТ подгруппа определяется преподавателем (в API отдельного поля нет).
+    """
+    variants = variants or {}
+    choices = choices or {}
+    subjects = sorted(variants)
+    chosen = [subject for subject in subjects if choices.get(subject)]
+    lines = [
+        "🔀 <b>Моя подгруппа</b>",
+        "",
+        "Часть пар у группы идёт по подгруппам: в одно время стоят две пары с одним "
+        "предметом, но разными преподавателями. Выбери своего — и бот будет "
+        "показывать только его вариант, а общие пары оставит всем.",
+        "",
+        "<i>Если не знаешь свою подгруппу: посмотри преподавателя в расписании, "
+        "спроси у старосты или выбери «все варианты» — тогда будут видны оба.</i>",
+        "",
+    ]
+    if subjects:
+        lines.append("Предметов с делением: <b>%d</b>, выбрано: <b>%d</b>"
+                     % (len(subjects), len(chosen)))
+        lines.append("")
+    for subject in subjects:
+        teacher = choices.get(subject) or ""
+        mark = "✅" if teacher else "•"
+        lines.append("%s <b>%s</b>%s" % (mark, esc(subject),
+                                         (" — " + esc(teacher)) if teacher else ""))
+    return "\n".join(lines)
+
+
 def ask_day(example="15.10"):
     """Подсказка: на какую дату показать расписание."""
     return ("🔎 <b>На какой день показать расписание?</b>\n\n"

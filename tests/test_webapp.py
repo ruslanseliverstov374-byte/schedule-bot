@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Проверка веб-слоя бота (webapp.py): health-check, страница состояния, вебхук.
 
 Запуск:
@@ -503,8 +503,49 @@ def main():
               data["updates"].get("last_error"))
         check("видно время последнего обновления",
               bool(data["updates"].get("last_update_at")), data["updates"])
+        check("есть счётчики по каждому боту",
+              isinstance(data.get("bots_updates"), dict), sorted(data))
     finally:
         diag.stop()
+
+    print("\n12. Зависшее сообщение не блокирует очередь бота")
+    # Один студент не должен останавливать бота для всех: если обработка
+    # дольше лимита, она считается ошибкой, а следующие сообщения проходят.
+    import webapp as webapp_module
+
+    hang = threading.Event()
+
+    def hanging_handler(update):
+        if (update.get("message") or {}).get("text") == "зависни":
+            hang.wait(5)
+            return
+        handled_now.append(update)
+
+    handled_now = []
+    resilient = StatusApp(FakeStore(), on_update=hanging_handler,
+                          webhook_secret=SECRET, bot_username=BOT_USERNAME,
+                          engine=None, logger=lambda message: None)
+    apps.append(resilient)
+    got = resilient.start(port=0, host="127.0.0.1")
+    saved_timeout = webapp_module.UPDATE_TIMEOUT
+    webapp_module.UPDATE_TIMEOUT = 0.4
+    try:
+        post_update(got, {"update_id": 31, "message": {"text": "зависни"}})
+        post_update(got, {"update_id": 32, "message": {"text": "обычное"}})
+        check("следующее сообщение обработано, несмотря на зависшее",
+              wait_for(lambda: len(handled_now) == 1, timeout=5), len(handled_now))
+        data = json.loads(call(got, "GET", "/service.json")[2])
+        endpoint = (data.get("bots_updates") or {}).get("/telegram") or {}
+        check("зависшее сообщение учтено как ошибка",
+              int(endpoint.get("errors", 0)) >= 1, endpoint)
+        check("видно, что причина — таймаут",
+              int(endpoint.get("timeouts", 0)) >= 1, endpoint)
+        check("второй студент получил ответ (handled растёт)",
+              int(endpoint.get("handled", 0)) >= 1, endpoint)
+    finally:
+        hang.set()
+        webapp_module.UPDATE_TIMEOUT = saved_timeout
+        resilient.stop()
 
     print("\n" + "=" * 60)
     print("Проверок: %d, провалов: %d" % (len(CHECKS), len(FAILURES)))

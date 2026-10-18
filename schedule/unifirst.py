@@ -308,6 +308,67 @@ def is_split_slot(block):
     return len((block or {}).get("lessons") or []) > 1
 
 
+def split_subjects(lessons):
+    """Предметы, которые делятся на подгруппы: {предмет: [преподаватели]}.
+
+    В API ПГУФКСиТ подгруппа никак не помечена: в одном слоте стоят несколько пар
+    с ОДНИМ предметом, но разными преподавателями (иногда и разными аудиториями).
+    Именно такие предметы предлагаем студенту выбрать один раз — дальше бот
+    показывает только его вариант.
+
+    Слот, где в одно время стоят РАЗНЫЕ предметы, — это поток, а не подгруппы:
+    его в список не берём.
+    """
+    result = {}
+    for block in group_by_slot(lessons or []):
+        items = block.get("lessons") or []
+        if len(items) < 2:
+            continue
+        subjects = {(item.get("subject") or "").strip() for item in items}
+        if len(subjects) != 1:
+            continue
+        subject = subjects.pop()
+        if not subject:
+            continue
+        teachers = []
+        for item in items:
+            for teacher in item.get("teachers") or []:
+                teacher = str(teacher).strip()
+                if teacher and teacher not in teachers:
+                    teachers.append(teacher)
+        if len(teachers) >= 2:
+            known = result.setdefault(subject, [])
+            for teacher in teachers:
+                if teacher not in known:
+                    known.append(teacher)
+    return result
+
+
+def filter_my_subgroups(lessons, choices):
+    """Оставляет только выбранные варианты подгрупп.
+
+    ``choices`` — {предмет: преподаватель}. Если по предмету выбора нет или
+    выбранный преподаватель в этой паре не встречается, показываем все варианты:
+    лучше показать лишнее, чем потерять пару.
+    """
+    if not choices:
+        return list(lessons or [])
+    keep = []
+    for block in group_by_slot(lessons or []):
+        items = block.get("lessons") or []
+        subjects = {(item.get("subject") or "").strip() for item in items}
+        if len(items) >= 2 and len(subjects) == 1:
+            teacher = str(choices.get(subjects.pop()) or "").strip()
+            if teacher:
+                chosen = [item for item in items
+                          if teacher in [str(name).strip() for name in item.get("teachers") or []]]
+                if chosen:
+                    keep.extend(chosen)
+                    continue
+        keep.extend(items)
+    return keep
+
+
 def diff_lessons(old_lessons, new_lessons):
     """Разница между двумя версиями недели.
 

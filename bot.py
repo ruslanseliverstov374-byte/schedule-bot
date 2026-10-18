@@ -717,11 +717,26 @@ class ScheduleBot:
         rows = [
             [tgbot.btn("🎓 Сменить группу", "st:group")],
         ]
-        # У КГАСУ группа делится на подгруппы прямо в файле расписания —
-        # даём поменять свою в любой момент.
+        # У КГАСУ подгруппа — колонка файла, у ПГУФКСиТ — выбранный преподаватель.
         if self.provider_subgroups(user.get("group_title") or ""):
             rows.append([tgbot.btn("🔀 Подгруппа: %s" % (user.get("subgroup") or "все"),
                                    "st:subgroup")])
+        else:
+            # Кнопка «моя подгруппа» для ПГУФКСиТ включается флагом SUBGROUPS_UI:
+            # фича новая и включается после полной проверки сценариев, чтобы не
+            # рисковать работой основного экрана настроек у студентов.
+            if os.environ.get("SUBGROUPS_UI", "0") == "1":
+                try:
+                    my_choices = self.store.user_subgroups(user["tg_id"])
+                    variants = self.my_subgroup_variants(user)
+                except Exception:
+                    variants, my_choices = {}, {}
+                if variants:
+                    rows.append([tgbot.btn("🔀 Моя подгруппа: %d из %d"
+                                           % (len([s for s in variants
+                                                   if my_choices.get(s)]),
+                                              len(variants)),
+                                           "ms:open")])
         rows.extend([
             [tgbot.btn(evening, "st:evening"),
              tgbot.btn("🕒 Время: %s" % user.get("evening_time"), "st:time")],
@@ -1260,16 +1275,122 @@ class ScheduleBot:
         return False
 
     def lessons_of(self, chat_id, user, day):
-        """Пары на дату; при недоступности API — из кэша."""
+        """Пары на дату; при недоступности API — из кэша.
+
+        Здесь же применяется выбор подгрупп: у ПГУФКСиТ подгруппа определяется
+        преподавателем (см. `unifirst.filter_my_subgroups`), у КГАСУ — колонкой
+        файла (см. `providers.filter_by_subgroup`).
+        """
         group_title = user["group_title"]
         year, week = unifirst.iso_year_week(day)
         try:
             lessons, _, _ = self.engine.ensure_week(group_title, year, week)
-            return lessons, True
+            online = True
         except (unifirst.UnifirstError, providers.ProviderError) as error:
             self.log("API недоступен для %s: %s" % (group_title, error))
             row = self.store.get_timetable(group_title, year, week)
-            return (row["lessons"] if row else []), False
+            lessons = row["lessons"] if row else []
+            online = False
+        lessons = self.filter_lessons_for_user(lessons, user)
+        return lessons, online
+
+    def filter_lessons_for_user(self, lessons, user):
+        """Показывает студенту только его варианты подгрупп (если выбраны)."""
+        if not lessons:
+            return list(lessons or [])
+        choices = self.store.user_subgroups((user or {}).get("tg_id")) \
+            if (user or {}).get("tg_id") else {}
+        return unifirst.filter_my_subgroups(lessons, choices)
+
+    def subgroup_choice_pending(self, user, lessons):
+        """Есть ли в этих парах предмет с подгруппами, по которому нет выбора."""
+        if not (user or {}).get("tg_id"):
+            return False
+        choices = self.store.user_subgroups(user["tg_id"])
+        for subject in unifirst.split_subjects(lessons or []):
+            if subject not in choices:
+                return True
+        return False
+
+    def my_subgroup_variants(self, user):
+        """Предметы, которые делятся на подгруппы: {предмет: [преподаватели]}.
+
+        Смотрим текущую и следующую неделю: предмет может встречаться только в
+        одной из них. Расписание берётся из кэша движка, поэтому экран открывается
+        быстро и не дёргает сайт при каждом нажатии.
+        """
+        group_title = (user or {}).get("group_title")
+        if not group_title:
+            return {}
+        year, week = unifirst.iso_year_week(self.local_today(user))
+        variants = {}
+        for delta in (0, 1):
+            shift_year, shift_week = unifirst.shift_week(year, week, delta)
+            try:
+                lessons, _, _ = self.engine.ensure_week(group_title, shift_year, shift_week)
+            except (unifirst.UnifirstError, providers.ProviderError) as error:
+                # Источник недоступен (или сервис только что проснулся) — берём
+                # расписание из кэша базы: выбор подгруппы должен работать всегда.
+                self.log("Подгруппы: расписание недоступно (%s)" % error)
+                row = self.store.get_timetable(group_title, shift_year, shift_week)
+                lessons = (row or {}).get("lessons") or []
+                if not lessons:
+                    continue
+            for subject, teachers in unifirst.split_subjects(lessons).items():
+                known = variants.setdefault(subject, [])
+                for teacher in teachers:
+                    if teacher not in known:
+                        known.append(teacher)
+        return variants
+
+    def ask_my_subgroup(self, chat_id, user, edit_message_id=None):
+        """Экран «моя подгруппа»: по каждому предмету выбирается преподаватель."""
+        if not self.require_group(chat_id, user):
+            return
+        variants = self.my_subgroup_variants(user)
+        if not variants:
+            self.tg.send_message(
+                chat_id,
+                "🔀 В расписании этой группы деления на подгруппы нет — все пары общие.\n"
+                "Если появится, бот предложит выбрать.")
+            return
+        choices = self.store.user_subgroups(user["tg_id"])
+        subjects = sorted(variants)
+        buttons = []
+        for index, subject in enumerate(subjects):
+            chosen = choices.get(subject) or ""
+            for teacher_index, teacher in enumerate(variants[subject]):
+                mark = "✅ " if teacher == chosen else ""
+                buttons.append([tgbot.btn("%s%s · %s" % (mark, teacher[:26], subject[:26]),
+                                          "ms:%d:%d" % (index, teacher_index))])
+            if chosen:
+                buttons.append([tgbot.btn("📖 %s — все варианты" % subject[:26],
+                                          "ms:%d:all" % index)])
+        buttons.append([tgbot.btn("🏠 Меню", "menu")])
+        self.store.set_state(user["tg_id"], "")
+        self._send_or_edit(chat_id, texts.my_subgroup_screen(variants, choices),
+                           tgbot.inline(buttons), edit_message_id)
+
+    def apply_my_subgroup(self, chat_id, user, subject_index, teacher_index):
+        """Сохраняет выбор подгруппы по предмету (teacher_index < 0 — показать все)."""
+        variants = self.my_subgroup_variants(user)
+        subjects = sorted(variants)
+        if not (0 <= subject_index < len(subjects)):
+            return
+        subject = subjects[subject_index]
+        if 0 <= teacher_index < len(variants[subject]):
+            teacher = variants[subject][teacher_index]
+            self.store.set_user_subgroup(user["tg_id"], subject, teacher)
+            self.tg.send_message(
+                chat_id,
+                "✅ Запомнил: по предмету «%s» твоя подгруппа — <b>%s</b>.\n"
+                "Дальше буду показывать только её." % (texts.esc(subject),
+                                                       texts.esc(teacher)))
+        else:
+            self.store.clear_user_subgroup(user["tg_id"], subject)
+            self.tg.send_message(chat_id, "📖 По предмету «%s» показываю все варианты."
+                                 % texts.esc(subject))
+        self.ask_my_subgroup(chat_id, self.store.get_user(user["tg_id"]))
 
     def send_day(self, chat_id, user, day, actions=None):
         if not self.require_group(chat_id, user):
@@ -1295,6 +1416,11 @@ class ScheduleBot:
         rows = []
         if day_lessons:
             rows.append([tgbot.btn("📝 ДЗ по предмету", "hwp:%s" % day.isoformat())])
+        # Если в этот день есть деление на подгруппы, а студент ещё не выбрал
+        # свою — предлагаем выбрать (флаг: включаем после полной проверки фичи).
+        if os.environ.get("SUBGROUPS_UI", "0") == "1" and day_lessons and \
+                self.subgroup_choice_pending(user, day_lessons):
+            rows.append([tgbot.btn("🔀 Указать мою подгруппу", "ms:open")])
         # Листать дни можно кнопками: так удобно посмотреть и прошедшие даты.
         rows.append([tgbot.btn("⬅️ Предыдущий", "d:%s" % (day - timedelta(days=1)).isoformat()),
                      tgbot.btn("Следующий ➡️", "d:%s" % (day + timedelta(days=1)).isoformat())])
@@ -1369,7 +1495,7 @@ class ScheduleBot:
             row = self.store.get_timetable(group_title, year, week)
             lessons = row["lessons"] if row else []
             online = False
-        text = texts.week_schedule(providers.filter_by_subgroup(lessons, user.get("subgroup")),
+        text = texts.week_schedule(self.filter_lessons_for_user(lessons, user),
                                    group_title, year, week)
         note = texts.cache_note(online=online)
         if note:
@@ -1721,6 +1847,15 @@ class ScheduleBot:
             self.apply_subgroup(chat_id, user, int(parts[1]), int(parts[2]), message_id)
         elif head == "sub":
             self.apply_subgroup_label(chat_id, user, int(parts[1]))
+        elif head == "ms":
+            # Выбор своей подгруппы у ПГУФКСиТ: ms:open, ms:<предмет>:<преподаватель|all>
+            if len(parts) == 1 or parts[1] == "open":
+                self.ask_my_subgroup(chat_id, user, message_id)
+            elif len(parts) >= 3:
+                index = int(parts[1]) if parts[1].lstrip("-").isdigit() else 0
+                teacher_part = parts[2]
+                teacher_index = int(teacher_part) if teacher_part.lstrip("-").isdigit() else -1
+                self.apply_my_subgroup(chat_id, user, index, teacher_index)
         elif head == "wk":
             self.send_week(chat_id, user, int(parts[1]), int(parts[2]))
         elif head == "d":

@@ -223,6 +223,7 @@ def main(argv=None):
     # В облаке оба бота принимают сообщения через один HTTP-сервер: у каждого
     # свой путь и секрет, а порт остаётся один. Так бесплатный сервис, который
     # засыпает, просыпается от сообщения любому из ботов.
+    app = None
     if webhook_base and len(bots) > 1:
         from webapp import StatusApp
 
@@ -247,6 +248,8 @@ def main(argv=None):
         thread.start()
         threads.append(thread)
         _watch(entry, entries, thread, bot)
+    if app is not None:
+        _watch_queue(app, bots)
     try:
         for thread in threads:
             thread.join()
@@ -273,6 +276,47 @@ def _watch(entry, entries, thread, bot=None):
                     pass
             write_status(entries)
     threading.Thread(target=check, daemon=True).start()
+
+
+def _watch_queue(app, bots, interval=60, stuck_minutes=12, min_queue=5):
+    """Следит за очередями ботов: зависшую очередь лечит перезапуском сервиса.
+
+    Обработка каждого сообщения ограничена по времени (webapp.UPDATE_TIMEOUT),
+    но если скан распознаётся подряд для нескольких студентов, очередь может
+    вырасти на десятки сообщений. Тогда лучше перезапустить сервис: Render
+    поднимет его заново, кэш расписания на диске сохранится, а студенты получат
+    ответ через несколько секунд, а не через полчаса.
+
+    Условие нарочно осторожное: очередь длинная И за последние минуты не
+    обработано ни одного сообщения И были таймауты. Обычный всплеск активности
+    (перемена, вечерний дайджест) под это не попадает.
+    """
+    if os.environ.get("SELF_HEAL", "1") == "0":
+        return
+
+    def check():
+        last_handled = {}
+        while True:
+            time.sleep(interval)
+            try:
+                stats = app.endpoint_stats()
+            except Exception:
+                continue
+            for path, counter in stats.items():
+                handled = int(counter.get("handled", 0))
+                queue_size = int(counter.get("queue", 0))
+                timeouts = int(counter.get("timeouts", 0))
+                previous = last_handled.get(path)
+                last_handled[path] = handled
+                if previous is None:
+                    continue
+                if queue_size >= min_queue and handled == previous and timeouts > 0:
+                    app.log("Очередь %s стоит: в очереди %d, таймаутов %d — "
+                            "перезапускаю сервис" % (path, queue_size, timeouts))
+                    time.sleep(1)
+                    os._exit(3)          # Render поднимет контейнер заново
+
+    threading.Thread(target=check, name="queue-watchdog", daemon=True).start()
 
 
 def _run_bot(bot, entry=None, entries=None, retry_seconds=60, max_retry_seconds=600):

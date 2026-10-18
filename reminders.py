@@ -83,6 +83,21 @@ class ReminderEngine:
         lessons = [item for item in row["lessons"] if item.get("date") == target_date.isoformat()]
         return lessons, (year, week)
 
+    def lessons_for_user(self, lessons, user):
+        """Оставляет только варианты подгрупп, которые выбрал студент.
+
+        Два механизма: у ПГУФКСиТ подгруппа — это выбранный преподаватель
+        (`unifirst.filter_my_subgroups`), у КГАСУ — колонка файла
+        (`providers.filter_by_subgroup`). Напоминания должны совпадать с тем,
+        что студент видит в расписании.
+        """
+        filtered = providers.filter_by_subgroup(lessons or [], (user or {}).get("subgroup"))
+        try:
+            choices = self.store.user_subgroups(user["tg_id"]) if user else {}
+        except Exception:
+            choices = {}
+        return unifirst.filter_my_subgroups(filtered, choices)
+
     def ensure_week(self, group_title, year, week, force=False):
         """Обновляет неделю в кэше, если она устарела. Возвращает (lessons, changed, old)."""
         age = self.store.timetable_age_minutes(group_title, year, week)
@@ -189,8 +204,8 @@ class ReminderEngine:
                 key = "evening:%s" % today.isoformat()
                 if late_minutes <= EVENING_GRACE_MINUTES:
                     if not self.already_sent(user["tg_id"], "evening", key):
-                        lessons = providers.filter_by_subgroup(
-                            self.safe_lessons(group_title, tomorrow), user.get("subgroup"))
+                        lessons = self.lessons_for_user(
+                            self.safe_lessons(group_title, tomorrow), user)
                         homework = self.store.list_homework(
                             user["tg_id"], group_title, scope="group",
                             due_from=tomorrow.isoformat(), due_to=tomorrow.isoformat())
@@ -207,8 +222,7 @@ class ReminderEngine:
         # 2. Предупреждение перед парой — строго до начала пары.
         before_minutes = int(user.get("before_minutes") or 0)
         if before_minutes > 0:
-            lessons = providers.filter_by_subgroup(
-                self.safe_lessons(group_title, today) or [], user.get("subgroup"))
+            lessons = self.lessons_for_user(self.safe_lessons(group_title, today) or [], user)
             # Идём по слотам: если пара делится на подгруппы, напоминание одно,
             # со списком вариантов, а не два одинаковых подряд.
             for block in unifirst.group_by_slot(lessons):

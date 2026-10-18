@@ -154,6 +154,13 @@ class Store:
             " created_at TEXT DEFAULT '', author_id INTEGER, target TEXT DEFAULT '',"
             " target_title TEXT DEFAULT '', text TEXT DEFAULT '',"
             " delivered INTEGER DEFAULT 0, failed INTEGER DEFAULT 0)")
+        # Выбранная подгруппа по предмету: у ПГУФКСиТ подгруппы различаются
+        # преподавателем (в API отдельного поля нет), поэтому храним пару
+        # «предмет → преподаватель».
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS user_subgroups ("
+            " tg_id INTEGER NOT NULL, subject TEXT NOT NULL, teacher TEXT DEFAULT '',"
+            " updated_at TEXT DEFAULT '', PRIMARY KEY (tg_id, subject))")
 
     def execute(self, sql, params=()):
         with self._lock, self.connect() as connection:
@@ -237,6 +244,34 @@ class Store:
         self.execute(
             "UPDATE users SET last_seen=?, messages_count=COALESCE(messages_count, 0)+1"
             " WHERE tg_id=?", (now_iso(), tg_id))
+
+    # ------------------------------------------------- подгруппы по предметам
+
+    def user_subgroups(self, tg_id):
+        """Какие преподаватели выбраны пользователем: {предмет: преподаватель}."""
+        rows = self.query("SELECT subject, teacher FROM user_subgroups WHERE tg_id=?",
+                          (tg_id,))
+        return {row["subject"]: row["teacher"] for row in rows}
+
+    def set_user_subgroup(self, tg_id, subject, teacher):
+        """Сохраняет выбор подгруппы по предмету (teacher='' — показывать все)."""
+        if not teacher:
+            return self.clear_user_subgroup(tg_id, subject)
+        self.execute(
+            "INSERT INTO user_subgroups(tg_id, subject, teacher, updated_at)"
+            " VALUES(?,?,?,?) ON CONFLICT(tg_id, subject) DO UPDATE SET"
+            " teacher=excluded.teacher, updated_at=excluded.updated_at",
+            (tg_id, subject, teacher, now_iso()))
+        return self.user_subgroups(tg_id)
+
+    def clear_user_subgroup(self, tg_id, subject=""):
+        """Убирает выбор по одному предмету или по всем сразу."""
+        if subject:
+            self.execute("DELETE FROM user_subgroups WHERE tg_id=? AND subject=?",
+                         (tg_id, subject))
+        else:
+            self.execute("DELETE FROM user_subgroups WHERE tg_id=?", (tg_id,))
+        return self.user_subgroups(tg_id)
 
     def delete_user(self, tg_id):
         """Удаляет запись пользователя (например, если это запись самого бота)."""
