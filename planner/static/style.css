@@ -52,6 +52,29 @@ h3.col-title { font-size: 13px; text-transform: uppercase; letter-spacing: .04em
 }
 .tab:hover { background: var(--accent-soft); color: var(--ink); }
 .tab.active { background: var(--accent); color: #fff; }
+.tab.logout { color: var(--muted); text-decoration: none; }
+.tab.logout:hover { background: var(--bad-soft); color: var(--bad); }
+.account-name { font-size: 14px; font-weight: 500; color: var(--accent); }
+
+/* Аккаунты */
+.account-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.account-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px;
+  background: #fcfdff;
+}
+.account-row .who { font-weight: 650; }
+.account-row .who .role { font-size: 11.5px; font-weight: 500; color: var(--muted);
+  margin-left: 8px; }
+.account-row .seen { color: var(--muted); font-size: 12.5px; }
+.account-row .actions { margin-left: auto; display: flex; gap: 8px; }
+.account-new {
+  margin-top: 10px; padding: 12px 14px; border-radius: 12px;
+  background: var(--good-soft); border-left: 4px solid var(--good);
+  font-size: 14px; display: none;
+}
+.account-new code { background: #fff; padding: 2px 8px; border-radius: 6px;
+  font-size: 15px; font-weight: 650; }
 .topstats { margin-left: auto; display: flex; gap: 16px; flex-wrap: wrap; }
 .topstats .stat { text-align: right; }
 .topstats .stat b { display: block; font-size: 17px; }

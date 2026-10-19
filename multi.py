@@ -103,10 +103,12 @@ def send_planner_password(token, owner_id, password, webhook_base, logger):
             "Личный планировщик учёбы теперь работает 24/7 и открывается по адресу:\n"
             "%s/planner\n\n"
             "Пароль для входа: <code>%s</code>\n\n"
-            "Сайт знает расписание твоих групп: раскладывает задачи на шаги, "
+            "Сайт знает расписание выбранных групп: раскладывает задачи на шаги, "
             "считает сроки по свободным окнам между парами и показывает "
-            "статистику. Пароль можно сменить, задав в Render переменную "
-            "<code>PLANNER_PASSWORD</code>." % (base, password))
+            "статистику.\n\n"
+            "Второй аккаунт (с отдельным паролем и своими задачами) добавляется "
+            "в интерфейсе: Настройки → Аккаунты. Свой пароль можно задать "
+            "переменной <code>PLANNER_PASSWORD</code> в Render." % (base, password))
     return warn_owner(token, owner_id, text, logger)
 
 
@@ -249,15 +251,21 @@ def main(argv=None):
     if planner_allowed and (planner_password or (owner_id and webhook_base)):
         try:
             from planner.service import PlannerService
-            planner = PlannerService(db_path=DEFAULT_DB, schedule_bot_path=ROOT,
-                                     password=planner_password or None, logger=print)
-            generated = planner.ensure_password()
+            planner = PlannerService(
+                db_path=DEFAULT_DB, schedule_bot_path=ROOT,
+                password=planner_password or None,
+                owner_name=(env_value("PLANNER_OWNER_NAME", "") or "Владелец"),
+                default_groups=(env_value("PLANNER_DEFAULT_GROUPS", "")
+                                or "unifirst:26282"),
+                logger=print)
+            owner_account = planner.ensure_accounts()
             planner.start_background()
-            print("Планёрка включена: /planner (вход по паролю)")
-            if generated and owner_id:
-                # Пароль уходит владельцу в Telegram: настраивать Render не нужно.
+            print("Планёрка включена: /planner (вход по паролю, аккаунтов: %d)"
+                  % len(planner.store.accounts()))
+            if owner_account and owner_id:
+                # Пароль владельца уходит в Telegram: настраивать Render не нужно.
                 send_planner_password(token_unifirst or token_kgasu, owner_id,
-                                      generated, webhook_base, print)
+                                      owner_account["password"], webhook_base, print)
         except Exception as error:
             print("Планёрка не запущена: %s" % error)
             traceback.print_exc(limit=3)

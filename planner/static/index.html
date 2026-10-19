@@ -12,7 +12,7 @@
   <div class="brand">
     <span class="logo">📚</span>
     <div>
-      <h1>Планёрка</h1>
+      <h1>Планёрка <span class="account-name" id="account-name"></span></h1>
       <div class="muted" id="today-label">—</div>
     </div>
   </div>
@@ -22,6 +22,7 @@
     <button class="tab" data-tab="calendar">Календарь</button>
     <button class="tab" data-tab="stats">Статистика</button>
     <button class="tab" data-tab="settings">Настройки</button>
+    <a class="tab logout" href="/planner/logout">Выйти</a>
   </nav>
   <div class="topstats" id="topstats"></div>
 </header>
@@ -154,6 +155,22 @@
       <p class="muted small">Расписание выбранных групп учитывается при планировании:
         пары вычитаются из свободных окон. Список групп берётся из кэша ботов
         расписания.</p>
+    </div>
+
+    <div class="card" id="accounts-card" style="display:none">
+      <div class="card-head">
+        <h2>Аккаунты</h2>
+        <span class="muted small">у каждого свой пароль и свои задачи</span>
+      </div>
+      <div id="accounts-list" class="account-list"></div>
+      <form id="account-form" class="quick-form">
+        <input id="account-name-input" placeholder="Имя, например «София»" required>
+        <input id="account-password-input" placeholder="Пароль (пусто — сгенерирую)">
+        <button class="btn primary" type="submit">Добавить аккаунт</button>
+      </form>
+      <div id="account-new" class="account-new"></div>
+      <p class="muted small">Пароль показывается один раз — передайте его человеку.
+        Его можно сменить кнопкой «Новый пароль».</p>
     </div>
 
     <div class="card">

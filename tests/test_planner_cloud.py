@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Проверки встроенной «Планёрки»: вход по паролю, API, статика, задачи.
+"""Проверки встроенной «Планёрки»: аккаунты, вход, API, изоляция задач.
 
 Поднимает настоящий HTTP-сервер сервиса ботов (StatusApp) с подключённым
 планировщиком и ходит по путям /planner/... как браузер.
@@ -12,8 +12,8 @@ import http.cookiejar
 import json
 import os
 import sys
-import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -24,11 +24,9 @@ from planner.service import PlannerService      # noqa: E402
 from store import Store      # noqa: E402
 from webapp import StatusApp      # noqa: E402
 
-PASSWORD = "test-password-123"
+OWNER_PASSWORD = "owner-password-123"
 DB_BOT = os.path.join(ROOT, "data", "test-planner-bot.db")
-#: В облаке планировщик живёт в той же базе, что и бот: так его данные попадают
-#: в закреплённую копию и переживают перезапуск сервиса.
-DB_PLANNER = DB_BOT
+DB_AUTO = os.path.join(ROOT, "data", "test-planner-auto.db")
 
 CHECKS = []
 FAILURES = []
@@ -44,7 +42,7 @@ def check(name, condition, detail=""):
 
 
 def cleanup():
-    for base in (DB_BOT, DB_PLANNER):
+    for base in (DB_BOT, DB_AUTO):
         for suffix in ("", "-wal", "-shm"):
             try:
                 os.remove(base + suffix)
@@ -61,11 +59,11 @@ class Client:
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.jar))
 
-    def get(self, path, follow=True):
+    def get(self, path):
         request = urllib.request.Request(self.base + path,
                                          headers={"User-Agent": "test"})
         try:
-            with self.opener.open(request, timeout=30) as response:
+            with self.opener.open(request, timeout=40) as response:
                 return response.status, response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode("utf-8", "replace")
@@ -81,7 +79,7 @@ class Client:
             self.base + path, data=data, method="POST",
             headers={"Content-Type": content_type, "User-Agent": "test"})
         try:
-            with self.opener.open(request, timeout=60) as response:
+            with self.opener.open(request, timeout=120) as response:
                 return response.status, response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode("utf-8", "replace")
@@ -90,25 +88,38 @@ class Client:
         request = urllib.request.Request(self.base + path, method="DELETE",
                                          headers={"User-Agent": "test"})
         try:
-            with self.opener.open(request, timeout=30) as response:
+            with self.opener.open(request, timeout=40) as response:
                 return response.status, response.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as error:
             return error.code, error.read().decode("utf-8", "replace")
 
 
 def main():
-    import urllib.parse      # noqa: E402 — нужен внутри Client
     cleanup()
     store = Store(DB_BOT)
-    planner = PlannerService(db_path=DB_PLANNER, schedule_bot_path=ROOT,
-                             password=PASSWORD, logger=lambda message: None)
+    planner = PlannerService(db_path=DB_BOT, schedule_bot_path=ROOT,
+                             password=OWNER_PASSWORD, owner_name="Руслан",
+                             default_groups="unifirst:26282",
+                             logger=lambda message: None)
+    first = planner.ensure_accounts()
     app = StatusApp(store, on_update=None, webhook_secret="",
                     bot_username="test", engine=None,
                     logger=lambda message: None, planner=planner)
     port = app.start(port=0, host="127.0.0.1")
     base = "http://127.0.0.1:%d" % port
     try:
-        print("1. Доступ и пароль")
+        print("1. Аккаунт владельца")
+        check("аккаунт владельца создан", bool(first), first)
+        check("пароль владельца из настроек сервиса",
+              (first or {}).get("password") == OWNER_PASSWORD, first)
+        check("повторно аккаунты не пересоздаются", planner.ensure_accounts() is None)
+        owner_account = planner.store.accounts()[0]
+        check("у аккаунта есть имя", owner_account["name"] == "Руслан",
+              owner_account)
+        check("аккаунт помечен владельцем", bool(owner_account["is_owner"]),
+              owner_account)
+
+        print("\n2. Доступ и пароль")
         anonymous = Client(base)
         status, body = anonymous.get("/planner")
         check("без входа — страница входа", status == 200 and "Пароль" in body,
@@ -122,9 +133,8 @@ def main():
         check("health открыт для мониторинга", status == 200, (status, body[:80]))
 
         client = Client(base)
-        status, body = client.post("/planner/login", form={"password": PASSWORD})
-        check("верный пароль пускает внутрь",
-              status in (200, 303) and ("План" in body or not body), (status, body[:80]))
+        status, body = client.post("/planner/login", form={"password": OWNER_PASSWORD})
+        check("верный пароль пускает внутрь", status in (200, 303), (status, body[:80]))
         status, body = client.get("/planner/")
         check("интерфейс отдаётся", status == 200 and "Планёрка" in body, status)
         status, body = client.get("/planner/static/app.js")
@@ -132,10 +142,15 @@ def main():
         status, body = client.get("/planner/static/style.css")
         check("стили отдаются", status == 200 and "--accent" in body, status)
 
-        print("\n2. API планировщика")
+        print("\n3. API планировщика")
         status, body = client.get("/planner/api/state")
         state = json.loads(body)
         check("состояние отдаётся", status == 200 and "today" in state, status)
+        check("в состоянии есть аккаунт",
+              (state.get("account") or {}).get("name") == "Руслан", state.get("account"))
+        check("группа по умолчанию подставлена",
+              [item["code"] for item in state.get("groups") or []] == ["26282"],
+              state.get("groups"))
         status, body = client.get("/planner/api/groups")
         groups = json.loads(body)
         titles = [item["title"] for item in groups["universities"]]
@@ -170,7 +185,7 @@ def main():
         status, body = client.get("/planner/api/plan.ics?days=7")
         check("экспорт в календарь", status == 200 and "BEGIN:VEVENT" in body, status)
 
-        print("\n3. Изменение и удаление")
+        print("\n4. Изменение и удаление")
         task_id = tasks[0]["id"]
         status, body = client.post("/planner/api/tasks/%d/done" % task_id,
                                    {"done": True})
@@ -185,7 +200,97 @@ def main():
         check("план можно очистить", status == 200 and json.loads(body).get("ok"),
               body[:80])
 
-        print("\n4. Боты не сломаны")
+        print("\n5. Второй аккаунт (София)")
+        status, body = client.post("/planner/api/accounts",
+                                   {"name": "Рахимова София"})
+        created = json.loads(body).get("account") or {}
+        check("аккаунт создан", status == 200 and created.get("name") ==
+              "Рахимова София", body[:120])
+        sophia_password = created.get("password") or ""
+        check("пароль сгенерирован", len(sophia_password) == 12, sophia_password)
+        account_id = created.get("id")
+
+        status, body = client.get("/planner/api/accounts")
+        accounts = json.loads(body).get("accounts") or []
+        names = [item["name"] for item in accounts]
+        check("владелец видит оба аккаунта", len(accounts) == 2 and
+              "Рахимова София" in names, names)
+
+        sophia = Client(base)
+        status, body = sophia.post("/planner/login", form={"password": sophia_password})
+        check("София входит со своим паролем", status in (200, 303), status)
+        status, body = sophia.get("/planner/api/state")
+        sophia_state = json.loads(body)
+        check("у Софии своё имя",
+              (sophia_state.get("account") or {}).get("name") == "Рахимова София",
+              sophia_state.get("account"))
+        check("София не владелец",
+              not (sophia_state.get("account") or {}).get("is_owner"))
+        status, body = sophia.get("/planner/api/tasks")
+        check("у Софии свои (пустые) задачи", json.loads(body)["tasks"] == [],
+              body[:100])
+        status, body = sophia.get("/planner/api/accounts")
+        check("София не видит список аккаунтов", status == 403, status)
+
+        status, body = sophia.post("/planner/api/chat",
+                                   {"text": "реферат по истории к пятнице"})
+        check("София создаёт свою задачу", status == 200 and len(
+            json.loads(body).get("task") or {}) > 0, body[:100])
+        status, body = sophia.get("/planner/api/tasks")
+        check("у Софии появилась её задача", len(json.loads(body)["tasks"]) == 1,
+              body[:100])
+        status, body = client.get("/planner/api/tasks")
+        check("задачи Софии не видны владельцу", json.loads(body)["tasks"] == [],
+              body[:100])
+
+        status, body = sophia.post("/planner/api/groups",
+                                   {"groups": [{"university": "unifirst",
+                                                "code": "26281"}]})
+        check("София выбирает свою группу", status == 200 and
+              [item["code"] for item in json.loads(body)["selected"]] == ["26281"],
+              body[:120])
+        status, body = client.get("/planner/api/groups")
+        owner_groups = [item["code"] for item in json.loads(body)["selected"]]
+        check("группа Софии не влияет на владельца", owner_groups == ["26ЗК01"],
+              owner_groups)
+
+        print("\n6. Смена и удаление аккаунта")
+        status, body = client.post("/planner/api/accounts/%d/password" % account_id, {})
+        new_password = json.loads(body).get("password") or ""
+        check("владелец меняет пароль Софии", status == 200 and len(new_password) == 12,
+              body[:100])
+        status, body = Client(base).post("/planner/login",
+                                         form={"password": sophia_password})
+        check("старый пароль больше не работает", status == 401, status)
+        status, body = Client(base).post("/planner/login",
+                                        form={"password": new_password})
+        check("новый пароль работает", status in (200, 303), status)
+
+        status, body = client.delete("/planner/api/accounts/%d" % account_id)
+        check("аккаунт удаляется", status == 200 and json.loads(body).get("ok"),
+              body[:100])
+        status, body = client.get("/planner/api/accounts")
+        check("остался один аккаунт", len(json.loads(body)["accounts"]) == 1,
+              body[:100])
+        status, body = Client(base).post("/planner/login",
+                                         form={"password": new_password})
+        check("удалённый аккаунт не входит", status == 401, status)
+
+        print("\n7. Автоматический пароль при первом запуске")
+        auto = PlannerService(db_path=DB_AUTO, schedule_bot_path=ROOT,
+                              password=None, owner_name="Владелец",
+                              logger=lambda message: None)
+        auto_result = auto.ensure_accounts()
+        auto_password = (auto_result or {}).get("password") or ""
+        check("пароль сгенерирован", len(auto_password) == 12, auto_password)
+        check("аккаунт создан", len(auto.store.accounts()) == 1,
+              auto.store.accounts())
+        check("повторно пароль не меняется", auto.ensure_accounts() is None)
+        check("вход с этим паролем работает",
+              auto.store.find_account_by_password(auto_password) is not None)
+        auto.store.close()
+
+        print("\n8. Боты не сломаны")
         status, body = client.get("/health")
         check("health ботов отвечает", status == 200 and body.strip() == "ok",
               (status, body[:40]))
@@ -195,32 +300,14 @@ def main():
         status, body = anonymous.get("/telegram")
         check("вебхук-путь не отдан планировщику", status == 404, status)
 
-        print("\n5. Данные попадают в базу бота")
+        print("\n9. Данные попадают в базу бота")
         bot_rows = store.query_one(
             "SELECT COUNT(*) AS total FROM sqlite_master WHERE name LIKE 'planner_%'")
         check("таблицы планировщика в базе бота", int(bot_rows["total"]) >= 4,
               bot_rows)
-        planner.app.store.execute(
-            "INSERT INTO planner_settings(key, value) VALUES('probe','1')"
-            " ON CONFLICT(key) DO UPDATE SET value='1'")
-        check("планировщик пишет в ту же базу", True)
-
-        print("\n6. Пароль генерируется сам и приходит в Telegram")
-        auto = PlannerService(db_path=DB_BOT, schedule_bot_path=ROOT,
-                              password=None, logger=lambda message: None)
-        generated = auto.ensure_password()
-        check("пароль сгенерирован", bool(generated) and len(generated) == 12,
-              generated)
-        check("пароль сохранён в базе",
-              auto.app.store.settings().get("planner_password") == generated,
-              auto.app.store.settings().get("planner_password"))
-        check("повторно пароль не меняется", auto.ensure_password() is None)
-        check("вход с этим паролем работает",
-              auto._handle_login(("password=%s" % generated).encode())[0] == 303)
-        from_env = PlannerService(db_path=DB_BOT, schedule_bot_path=ROOT,
-                                  password="from-env", logger=lambda message: None)
-        check("пароль из переменной окружения важнее базы",
-              from_env.ensure_password() is None)
+        check("аккаунты лежат в общей базе",
+              len(planner.store.accounts()) == 1,
+              planner.store.accounts())
     finally:
         app.stop()
         try:

@@ -10,6 +10,8 @@ const state = {
   settings: {},
   subjects: [],
   groups: { universities: [], selected: [] },
+  account: { id: 0, name: "", is_owner: false },
+  accounts: [],
 };
 
 //: Группы по умолчанию для кнопок «только ПГУФКСиТ» / «только КГАСУ».
@@ -19,6 +21,11 @@ const DEFAULT_GROUPS = { unifirst: "26282", kgasu: "26ЗК01" };
 
 async function api(path, options) {
   const response = await fetch(path, options);
+  if (response.status === 401) {
+    // Сессия истекла или пароль сменили — отправляем на вход.
+    window.location.href = "/planner/login";
+    throw new Error("Нужно войти заново");
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error("HTTP " + response.status + ": " + text.slice(0, 200));
@@ -222,6 +229,9 @@ async function loadToday() {
   const stateData = await api("/planner/api/state");
   state.settings = stateData.settings || {};
   state.subjects = stateData.subjects || [];
+  state.account = stateData.account || { id: 0, name: "", is_owner: false };
+  state.accounts = stateData.accounts || [];
+  renderAccountName();
   if (stateData.groups) {
     state.groups.selected = stateData.groups;
   }
@@ -535,7 +545,96 @@ async function loadSettings() {
     if (field) field.value = value;
   });
   if (data.groups) state.groups.selected = data.groups;
+  if (data.account) state.account = data.account;
+  if (data.accounts) state.accounts = data.accounts;
+  renderAccountName();
   await loadGroups();
+  await loadAccounts();
+}
+
+// ---------------------------------------------------------------- аккаунты
+
+function renderAccountName() {
+  const node = document.getElementById("account-name");
+  if (!node) return;
+  node.textContent = state.account.name ? "· " + state.account.name : "";
+}
+
+async function loadAccounts() {
+  const card = document.getElementById("accounts-card");
+  if (!card) return;
+  if (!state.account.is_owner) {
+    card.style.display = "none";
+    return;
+  }
+  card.style.display = "";
+  const data = await api("/planner/api/accounts");
+  state.accounts = data.accounts || [];
+  renderAccounts();
+}
+
+function renderAccounts() {
+  const list = document.getElementById("accounts-list");
+  if (!list) return;
+  list.innerHTML = (state.accounts || []).map((account) => `
+    <div class="account-row">
+      <div class="who">${escapeHtml(account.name)}
+        <span class="role">${account.is_owner ? "владелец" : "аккаунт"}</span>
+      </div>
+      <div class="seen">${account.last_seen
+        ? "заходил(а): " + escapeHtml(account.last_seen)
+        : "ещё не заходил(а)"}</div>
+      <div class="actions">
+        <button class="btn small" data-reset="${account.id}"
+          data-name="${escapeHtml(account.name)}">Новый пароль</button>
+        ${account.is_owner ? "" : `<button class="btn small danger ghost"
+          data-delete="${account.id}" data-name="${escapeHtml(account.name)}">Удалить</button>`}
+      </div>
+    </div>`).join("");
+  list.querySelectorAll("[data-reset]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Сменить пароль аккаунту «" + button.dataset.name + "»? Старый перестанет работать."))
+        return;
+      const result = await post(`/planner/api/accounts/${button.dataset.reset}/password`, {});
+      showNewPassword(button.dataset.name, result.password);
+      await loadAccounts();
+    });
+  });
+  list.querySelectorAll("[data-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Удалить аккаунт «" + button.dataset.name + "» вместе с его задачами?"))
+        return;
+      await api(`/planner/api/accounts/${button.dataset.delete}`, { method: "DELETE" });
+      toast("Аккаунт удалён");
+      await loadAccounts();
+    });
+  });
+}
+
+function showNewPassword(name, password) {
+  const box = document.getElementById("account-new");
+  if (!box) return;
+  box.style.display = "block";
+  box.innerHTML = `Пароль для «${escapeHtml(name)}»: <code>${escapeHtml(password)}</code>
+    <div class="muted small" style="margin-top:6px">
+      Показывается один раз — передайте его человеку. Войти: /planner</div>`;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(password).catch(() => {});
+  }
+}
+
+async function createAccount(event) {
+  event.preventDefault();
+  const name = document.getElementById("account-name-input").value.trim();
+  if (!name) return;
+  const password = document.getElementById("account-password-input").value.trim();
+  const result = await post("/planner/api/accounts",
+    password ? { name, password } : { name });
+  document.getElementById("account-name-input").value = "";
+  document.getElementById("account-password-input").value = "";
+  showNewPassword(result.account.name, result.account.password);
+  toast("Аккаунт «" + result.account.name + "» добавлен");
+  await loadAccounts();
 }
 
 async function saveSettings(event) {

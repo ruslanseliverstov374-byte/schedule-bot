@@ -95,6 +95,8 @@ class Assistant:
         self.planner = planner
         self.feed = feed
         self.logger = logger if callable(logger) else (lambda message: None)
+        # Всё, что делает ассистент, происходит в рамках одного аккаунта.
+        self.account_id = int(getattr(planner, "account_id", 1) or 1)
 
     # ------------------------------------------------------------- разбор
 
@@ -278,12 +280,14 @@ class Assistant:
         title = self._clean_title(text)
         steps = self.decompose(title, kind, estimate)
         task_id = self.store.add_task(
+            account_id=self.account_id,
             title=title, subject=subject, kind=kind, deadline=deadline,
             priority=priority,
             estimate_minutes=sum(minutes for _, minutes in steps),
             notes="создано из чата: " + text[:300], source="chat")
         for index, (label, minutes) in enumerate(steps):
-            self.store.add_subtask(task_id, label, minutes, index)
+            self.store.add_subtask(task_id, label, minutes, index,
+                                   account_id=self.account_id)
 
         plan = self.planner.plan()
         task_info = next((item for item in plan["tasks"] if item["id"] == task_id), None)
@@ -395,7 +399,7 @@ class Assistant:
         return "Плана пока нет — напиши задачу, и я разложу её по дням."
 
     def stats_reply(self):
-        counts = self.store.counts()
+        counts = self.store.counts(self.account_id)
         lines = ["📊 <b>Как успехи</b>",
                  "Открытых задач: %d, закрыто: %d" % (counts["tasks_open"],
                                                       counts["tasks_done"]),

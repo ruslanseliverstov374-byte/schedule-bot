@@ -80,10 +80,11 @@ def split_chunks(total, min_block, max_block):
 class Planner:
     """Считает свободное время и раскладывает задачи по дням."""
 
-    def __init__(self, store, feed, today=None):
+    def __init__(self, store, feed, today=None, account_id=1):
         self.store = store
         self.feed = feed
         self._today = today
+        self.account_id = int(account_id or 1)
 
     def today(self):
         return self._today or date.today()
@@ -91,7 +92,7 @@ class Planner:
     # --------------------------------------------------------------- настройки
 
     def settings(self):
-        raw = self.store.settings()
+        raw = self.store.settings(self.account_id)
         settings = {
             "windows": parse_windows(raw.get("study_windows")),
             "max_daily": int(raw.get("max_daily_minutes") or 300),
@@ -121,7 +122,7 @@ class Planner:
                 intervals.append((start, end))
             busy[day_iso] = intervals
         if include_planned:
-            for step in self.store.all_subtasks(only_planned=True):
+            for step in self.store.all_subtasks(self.account_id, only_planned=True):
                 day_iso = step.get("planned_date") or ""
                 if not day_iso:
                     continue
@@ -211,8 +212,8 @@ class Planner:
 
     def _split_long_steps(self, settings):
         """Режет длинные шаги на блоки: одна запись — один слот в календаре."""
-        for task in self.store.tasks():
-            steps = self.store.subtasks(task["id"])
+        for task in self.store.tasks(self.account_id):
+            steps = self.store.subtasks(task["id"], self.account_id)
             for step in steps:
                 estimate = int(step["estimate_minutes"] or 0)
                 if estimate <= settings["max_block"]:
@@ -230,7 +231,8 @@ class Planner:
                 for index, chunk in enumerate(chunks[1:], start=2):
                     self.store.add_subtask(task["id"],
                                            "%s (%d/%d)" % (step["title"], index, total),
-                                           chunk, ord_value=int(step["ord"]) + index - 1)
+                                           chunk, ord_value=int(step["ord"]) + index - 1,
+                                           account_id=self.account_id)
 
     def plan(self, horizon_days=None, persist=True):
         """Раскладывает все открытые задачи по свободным окнам.
@@ -240,7 +242,7 @@ class Planner:
         settings = self.settings()
         self._split_long_steps(settings)
         if persist:
-            self.store.clear_plan()
+            self.store.clear_plan(self.account_id)
         days = horizon_days or settings["horizon_days"]
         availability = self.availability(days)
         # Раскладка идёт по изменяемым окнам: занятый блок уменьшает окно дня.
@@ -250,10 +252,13 @@ class Planner:
         }
         capacity_by_date = {item["date"]: item["free_minutes"] for item in availability}
 
-        tasks = [task for task in self.store.tasks() if not task["done"]]
+        tasks = [task for task in self.store.tasks(self.account_id)
+                 if not task["done"]]
         enriched = []
         for task in tasks:
-            steps = [step for step in self.store.subtasks(task["id"]) if not step["done"]]
+            steps = [step for step in self.store.subtasks(task["id"],
+                                                        self.account_id)
+                     if not step["done"]]
             needed = sum(int(step["estimate_minutes"] or 0) for step in steps)
             deadline, limit_date = self._deadline_limit(task, settings)
             capacity_before = 0
@@ -281,7 +286,8 @@ class Planner:
                 day_iso, start, end = slot
                 if persist:
                     self.store.plan_subtask(step["id"], day_iso,
-                                            format_hhmm(start), format_hhmm(end))
+                                            format_hhmm(start), format_hhmm(end),
+                                            account_id=self.account_id)
                 planned_blocks += 1
 
         result = self.build_plan(days=days, enrich=enriched,
@@ -310,7 +316,7 @@ class Planner:
         settings = self.settings()
         days = days or settings["horizon_days"]
         availability = self.availability(days)
-        planned = self.store.all_subtasks(only_planned=True)
+        planned = self.store.all_subtasks(self.account_id, only_planned=True)
         by_date = {}
         for step in planned:
             by_date.setdefault(step["planned_date"], []).append({
