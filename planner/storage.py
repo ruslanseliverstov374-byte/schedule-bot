@@ -75,8 +75,6 @@ CREATE TABLE IF NOT EXISTS planner_account_settings (
     PRIMARY KEY (account_id, key)
 );
 CREATE INDEX IF NOT EXISTS idx_planner_subtasks_date ON planner_subtasks(planned_date);
-CREATE INDEX IF NOT EXISTS idx_planner_tasks_done ON planner_tasks(done);
-CREATE INDEX IF NOT EXISTS idx_planner_tasks_account ON planner_tasks(account_id);
 """
 
 DEFAULT_SETTINGS = {
@@ -158,6 +156,13 @@ class Store:
             if "account_id" not in self._columns("planner_sessions"):
                 self.connection.execute(
                     "ALTER TABLE planner_sessions ADD COLUMN account_id INTEGER DEFAULT 1")
+            # Индексы по новым столбцам создаём только после миграции: иначе на
+            # старой базе (без account_id) CREATE INDEX падает при запуске.
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_planner_tasks_done ON planner_tasks(done)")
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_planner_tasks_account"
+                " ON planner_tasks(account_id)")
         self.migrate_legacy_settings()
 
     def migrate_legacy_settings(self):
@@ -177,10 +182,12 @@ class Store:
             legacy = self.connection.execute(
                 "SELECT key, value FROM planner_settings").fetchall()
             for key, value in legacy:
+                # Значения из старой базы важнее умолчаний: это настройки,
+                # которые человек уже выбирал (например, свои группы).
                 self.connection.execute(
-                    "INSERT OR IGNORE INTO planner_account_settings"
-                    "(account_id, key, value) VALUES(?,?,?)",
-                    (owner[0], key, value))
+                    "INSERT INTO planner_account_settings(account_id, key, value)"
+                    " VALUES(?,?,?) ON CONFLICT(account_id, key) DO UPDATE SET"
+                    " value=excluded.value", (owner[0], key, value))
             self.connection.execute(
                 "ALTER TABLE planner_settings RENAME TO planner_settings_legacy")
 
