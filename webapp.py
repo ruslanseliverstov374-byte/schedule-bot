@@ -48,6 +48,8 @@ DEFAULT_PORT = 8080             # если ни аргумент, ни пере�
 DEFAULT_HOST = "0.0.0.0"
 SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 MAX_BODY = 1024 * 1024          # столько Telegram не присылает: защита от мусора
+#: Тело запросов встроенного приложения (Планёрка) — тоже ограничено.
+MAX_PLANNER_BODY = 256 * 1024
 BACKLOG_WARNING = 100           # с какого размера очереди предупреждать в лог
 WORKER_TIMEOUT = 5.0            # сколько секунд ждём рабочий поток в stop()
 #: Сколько максимум обрабатываем одно сообщение. Если распознавание скана или
@@ -234,13 +236,15 @@ class StatusApp:
     """
 
     def __init__(self, store, on_update=None, webhook_secret="", bot_username="",
-                 engine=None, logger=print, extra_endpoints=None):
+                 engine=None, logger=print, extra_endpoints=None, planner=None):
         self.store = store
         self.on_update = on_update
         self.webhook_secret = str(webhook_secret or "")
         self.bot_username = str(bot_username or "")
         self.engine = engine
         self.log = logger if callable(logger) else (lambda message: None)
+        #: «Планёрка» — встроенное веб-приложение. None, если выключена.
+        self.planner = planner
         # Маршруты вебхуков: путь -> {"secret": ..., "handler": ...}. Основной —
         # /telegram, дополнительные добавляются, когда в сервисе два бота.
         self.default_endpoint = {"path": "/telegram", "secret": self.webhook_secret,
@@ -670,6 +674,10 @@ class _StatusHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._guard(self._post)
 
+    def do_DELETE(self):
+        """DELETE нужен «Планёрке» (удаление задач), ботам — нет."""
+        self._guard(lambda: self._planner_request("DELETE") or self._method_not_allowed())
+
     def _route(self, head_only):
         """GET/HEAD: health-check и страница состояния, остальное — 404."""
         path = urlsplit(self.path).path
@@ -685,7 +693,46 @@ class _StatusHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._page(head_only)
             return
+        result = self._planner_request("GET", head_only=head_only)
+        if result:
+            return
         self._not_found(head_only)
+
+    # ------------------------------------------------------- «Планёрка»
+    def planner(self):
+        """Встроенное приложение планировщика (или None, если выключено)."""
+        app = self._app()
+        return getattr(app, "planner", None) if app is not None else None
+
+    def _planner_request(self, method, head_only=False):
+        """Отдаёт запрос «Планёрке», если путь её. True — ответ уже отправлен."""
+        planner = self.planner()
+        if planner is None:
+            return False
+        path = urlsplit(self.path).path
+        if path != "/planner" and not path.startswith("/planner/"):
+            return False
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        body = b""
+        if method in ("POST", "DELETE") and length > 0:
+            body = self.rfile.read(min(length, MAX_PLANNER_BODY))
+        result = planner.handle(method, path, urlsplit(self.path).query,
+                                dict(self.headers.items()), body)
+        if result is None:
+            return False
+        status, content_type, payload, extra = result
+        self._send_service(status, payload, content_type, extra, head_only=head_only)
+        return True
+
+    def _send_service(self, status, body, content_type, extra=None, head_only=False):
+        """Отправка ответа встроенного приложения (со своими заголовками)."""
+        headers = {name: value for name, value in (extra or {}).items()
+                   if name.lower() != "cache-control"}
+        self._send(status, body, content_type, close=True, head_only=head_only,
+                   extra=headers)
 
     def _service_json(self, head_only):
         # Файл состояния пишет multi.py рядом с базой; сюда же добавляем счётчики
@@ -750,6 +797,9 @@ class _StatusHandler(BaseHTTPRequestHandler):
         if app is None:
             self._plain(503, "приложение не подключено", close=True)
             return
+        # Сначала — встроенное приложение: у него свои пути /planner/...
+        if self._planner_request("POST"):
+            return
         # Маршрут должен быть объявлен: неизвестные пути не принимаем вовсе.
         endpoint = app.endpoints.get(path)
         if endpoint is None:
@@ -791,9 +841,9 @@ class _StatusHandler(BaseHTTPRequestHandler):
 
 
 def _unsupported_method(handler):
-    """PUT/DELETE и прочие методы, которых у нас нет, отвечают 405."""
+    """PUT/PATCH и прочие методы, которых у нас нет, отвечают 405."""
     handler._method_not_allowed()
 
 
-for _method in ("PUT", "DELETE", "PATCH", "OPTIONS", "TRACE", "CONNECT"):
+for _method in ("PUT", "PATCH", "OPTIONS", "TRACE", "CONNECT"):
     setattr(_StatusHandler, "do_" + _method, _unsupported_method)

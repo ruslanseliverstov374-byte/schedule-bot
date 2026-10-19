@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Планёрка — личный планировщик учёбы</title>
+<link rel="stylesheet" href="/planner/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">📚</span>
+    <div>
+      <h1>Планёрка</h1>
+      <div class="muted" id="today-label">—</div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="today">Сегодня</button>
+    <button class="tab" data-tab="tasks">Задачи</button>
+    <button class="tab" data-tab="calendar">Календарь</button>
+    <button class="tab" data-tab="stats">Статистика</button>
+    <button class="tab" data-tab="settings">Настройки</button>
+  </nav>
+  <div class="topstats" id="topstats"></div>
+</header>
+
+<main>
+  <!-- СЕГОДНЯ -->
+  <section class="tab-page active" id="page-today">
+    <div class="today-grid">
+      <div class="card">
+        <div class="card-head">
+          <h2>План на сегодня</h2>
+          <span class="muted small" id="groups-hint"></span>
+          <button class="btn small ghost" id="replan-btn">Пересчитать план</button>
+        </div>
+        <div id="warnings" class="warnings"></div>
+        <div class="two-col">
+          <div>
+            <h3 class="col-title">Учёба</h3>
+            <div id="today-blocks" class="block-list"></div>
+          </div>
+          <div>
+            <h3 class="col-title">Пары</h3>
+            <div id="today-pairs" class="pair-list"></div>
+          </div>
+        </div>
+        <div class="muted small" id="today-meta"></div>
+      </div>
+
+      <div class="card chat-card">
+        <div class="card-head">
+          <h2>Ассистент</h2>
+          <span class="muted small">знает расписание</span>
+        </div>
+        <div class="chat-log" id="chat-log">
+          <div class="msg bot">
+            Привет! Напиши, что нужно сделать: «переписать конспект по анатомии
+            к пятнице, 20 страниц» — разложу на шаги и впишу в свободные окна
+            между парами.
+          </div>
+        </div>
+        <div class="chat-quick" id="chat-quick">
+          <button class="chip" data-text="план на сегодня">план на сегодня</button>
+          <button class="chip" data-text="что дальше">что дальше</button>
+          <button class="chip" data-text="статистика">статистика</button>
+        </div>
+        <form class="chat-form" id="chat-form">
+          <input id="chat-input" placeholder="Что нужно сделать?" autocomplete="off">
+          <button class="btn primary" type="submit">→</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Быстро добавить задачу</h2></div>
+      <form class="quick-form" id="quick-form">
+        <input id="quick-title" placeholder="Например: реферат по истории" required>
+        <select id="quick-kind">
+          <option value="другое">другое</option>
+          <option value="конспект">конспект</option>
+          <option value="реферат">реферат</option>
+          <option value="презентация">презентация</option>
+          <option value="лабораторная">лабораторная</option>
+          <option value="задачи">задачи</option>
+          <option value="чтение">чтение</option>
+          <option value="подготовка">подготовка</option>
+        </select>
+        <input id="quick-deadline" type="date" title="Дедлайн">
+        <input id="quick-subject" list="subject-list" placeholder="Предмет">
+        <datalist id="subject-list"></datalist>
+        <button class="btn primary" type="submit">Добавить</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ЗАДАЧИ -->
+  <section class="tab-page" id="page-tasks">
+    <div class="card">
+      <div class="card-head">
+        <h2>Задачи</h2>
+        <label class="check"><input type="checkbox" id="show-done"> показывать закрытые</label>
+      </div>
+      <div id="task-list" class="task-list"></div>
+    </div>
+  </section>
+
+  <!-- КАЛЕНДАРЬ -->
+  <section class="tab-page" id="page-calendar">
+    <div class="card">
+      <div class="card-head">
+        <h2>Календарь на 14 дней</h2>
+        <span class="muted small">пары · учёба · свободное время</span>
+      </div>
+      <div id="calendar" class="calendar"></div>
+    </div>
+  </section>
+
+  <!-- СТАТИСТИКА -->
+  <section class="tab-page" id="page-stats">
+    <div class="stat-cards" id="stat-cards"></div>
+    <div class="card">
+      <div class="card-head"><h2>Неделя: план и факт</h2></div>
+      <div id="chart-week" class="chart"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>Месяц: минуты учёбы по дням</h2></div>
+      <div id="chart-month" class="chart"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>По предметам</h2></div>
+      <div id="chart-subjects" class="chart"></div>
+    </div>
+  </section>
+
+  <!-- НАСТРОЙКИ -->
+  <section class="tab-page" id="page-settings">
+    <div class="card">
+      <div class="card-head">
+        <h2>Мои группы</h2>
+        <span class="muted small" id="groups-summary">—</span>
+      </div>
+      <div class="group-quick">
+        <button class="btn small" data-quick="both">Обе группы</button>
+        <button class="btn small" data-quick="unifirst">Только ПГУФКСиТ</button>
+        <button class="btn small" data-quick="kgasu">Только КГАСУ</button>
+      </div>
+      <div class="group-picker" id="group-picker"></div>
+      <div class="row-actions">
+        <button class="btn primary" id="groups-save">Сохранить группы</button>
+      </div>
+      <p class="muted small">Расписание выбранных групп учитывается при планировании:
+        пары вычитаются из свободных окон. Список групп берётся из кэша ботов
+        расписания.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Настройки планирования</h2></div>
+      <form id="settings-form" class="settings-form">
+        <label>Окна для учёбы (через запятую)
+          <input name="study_windows" placeholder="09:00-13:00,14:30-22:00">
+        </label>
+        <label>Максимум минут в день
+          <input name="max_daily_minutes" type="number" min="30" max="720">
+        </label>
+        <label>Минимальный блок, мин
+          <input name="min_block" type="number" min="10" max="60">
+        </label>
+        <label>Максимальный блок, мин
+          <input name="max_block" type="number" min="30" max="180">
+        </label>
+        <label>Перерыв между блоками, мин
+          <input name="break_minutes" type="number" min="0" max="60">
+        </label>
+        <label>Запас до дедлайна, дней
+          <input name="safety_days" type="number" min="0" max="7">
+        </label>
+        <label>Горизонт планирования, дней
+          <input name="horizon_days" type="number" min="3" max="60">
+        </label>
+        <label>Выходные (0=Пн … 6=Вс, через запятую)
+          <input name="days_off" placeholder="6">
+        </label>
+        <label>Время вечернего напоминания
+          <input name="reminder_time" placeholder="20:30">
+        </label>
+        <label>Telegram chat_id (0 — выключить)
+          <input name="telegram_chat_id" placeholder="1368878379">
+        </label>
+        <label>Группы для расписания
+          <input name="schedule_groups" placeholder="unifirst:26282,kgasu:26ЗК01">
+        </label>
+        <button class="btn primary" type="submit">Сохранить</button>
+      </form>
+      <div class="row-actions">
+        <button class="btn" id="ics-btn">Экспорт в календарь (.ics)</button>
+        <button class="btn" id="remind-btn">Отправить план в Telegram</button>
+        <button class="btn danger ghost" id="reset-plan-btn">Сбросить план</button>
+      </div>
+      <p class="muted small">Расписание читается из кэша ботов расписания. Если неделя
+        не закэширована, для ПГУФКСиТ она подтянется из API автоматически.</p>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/planner/static/app.js"></script>
+</body>
+</html>

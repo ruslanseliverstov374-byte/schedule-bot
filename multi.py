@@ -92,6 +92,24 @@ def warn_owner(token, owner_id, text, logger):
         return False
 
 
+def send_planner_password(token, owner_id, password, webhook_base, logger):
+    """Отправляет владельцу ссылку и пароль от встроенной «Планёрки».
+
+    Пароль генерируется автоматически при первом запуске, поэтому настраивать
+    переменные в Render не нужно: владелец получает его прямо в Telegram.
+    """
+    base = (webhook_base or "").rstrip("/")
+    text = ("📚 <b>Планёрка включена</b>\n\n"
+            "Личный планировщик учёбы теперь работает 24/7 и открывается по адресу:\n"
+            "%s/planner\n\n"
+            "Пароль для входа: <code>%s</code>\n\n"
+            "Сайт знает расписание твоих групп: раскладывает задачи на шаги, "
+            "считает сроки по свободным окнам между парами и показывает "
+            "статистику. Пароль можно сменить, задав в Render переменную "
+            "<code>PLANNER_PASSWORD</code>." % (base, password))
+    return warn_owner(token, owner_id, text, logger)
+
+
 def restore_if_needed(token, db_path, owner_id, logger, provider=""):
     """Поднимает базу из закреплённой копии, если файла базы нет (облако).
 
@@ -223,14 +241,36 @@ def main(argv=None):
     # В облаке оба бота принимают сообщения через один HTTP-сервер: у каждого
     # свой путь и секрет, а порт остаётся один. Так бесплатный сервис, который
     # засыпает, просыпается от сообщения любому из ботов.
+    # Планёрка (личный планировщик учёбы) включается паролем PLANNER_PASSWORD и
+    # живёт на том же сервере по путям /planner/... — отдельный хостинг не нужен.
+    planner = None
+    planner_password = (env_value("PLANNER_PASSWORD", "") or "").strip()
+    planner_allowed = env_value("PLANNER_ENABLED", "1") != "0"
+    if planner_allowed and (planner_password or (owner_id and webhook_base)):
+        try:
+            from planner.service import PlannerService
+            planner = PlannerService(db_path=DEFAULT_DB, schedule_bot_path=ROOT,
+                                     password=planner_password or None, logger=print)
+            generated = planner.ensure_password()
+            planner.start_background()
+            print("Планёрка включена: /planner (вход по паролю)")
+            if generated and owner_id:
+                # Пароль уходит владельцу в Telegram: настраивать Render не нужно.
+                send_planner_password(token_unifirst or token_kgasu, owner_id,
+                                      generated, webhook_base, print)
+        except Exception as error:
+            print("Планёрка не запущена: %s" % error)
+            traceback.print_exc(limit=3)
+            planner = None
     app = None
-    if webhook_base and len(bots) > 1:
+    if webhook_base and (len(bots) > 1 or planner is not None):
         from webapp import StatusApp
 
         first_bot, first_entry = bots[0]
         app = StatusApp(first_bot.store, on_update=None, webhook_secret="",
                         bot_username=first_entry.get("username", ""),
-                        engine=first_bot.engine, logger=first_bot.log)
+                        engine=first_bot.engine, logger=first_bot.log,
+                        planner=planner)
         first_bot.attach_webhook(app, first_bot.webhook_path)
         for bot, _ in bots[1:]:
             bot.webhook_base = webhook_base
@@ -238,6 +278,8 @@ def main(argv=None):
         actual_port = app.start(port)
         first_bot.log("Общий HTTP-сервер на порту %s, маршруты: %s"
                       % (actual_port, ", ".join(sorted(app.endpoints))))
+        if planner is not None:
+            first_bot.log("Планёрка доступна по адресу %s/planner" % webhook_base)
         port = None      # сервер уже поднят — второй раз не поднимаем
 
     # Все боты запускаются в отдельных потоках, главный поток держит процесс живым.
